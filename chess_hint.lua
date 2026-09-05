@@ -1,4 +1,4 @@
--- Chess Move Hinter v5.4 for "Just a baseplate" (Roblox)
+-- Chess Move Hinter v5.4 for "Chess!" (Roblox)
 -- Built for the Matcha LuaVM (Drawing, WorldToScreen, synthetic mouse).
 --
 -- Overlays:
