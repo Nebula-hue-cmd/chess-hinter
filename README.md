@@ -1,6 +1,6 @@
 # chess_hint.lua
 
-Chess move hinter, threat radar, analyzer and autoplay for "Just a baseplate" (Roblox),
+Chess move hinter, threat radar, analyzer and autoplay for "Chess!" (Roblox),
 built for the **Matcha Luau executor** (works on any executor with `loadstring` +
 `HttpGet`/`request` via the universal loader below).
 
