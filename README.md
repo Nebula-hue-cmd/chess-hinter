@@ -4,6 +4,8 @@ Chess move hinter, threat radar, analyzer and autoplay for "Chess!" (Roblox),
 built for the **Matcha Luau executor** (works on any executor with `loadstring` +
 `HttpGet`/`request` via the universal loader below).
 
+Your advice for future updates is greatly appreciated and will be taken very seriously!
+
 ## What it does
 
 On **your** turn, arrow #1/#2/#3 mark the top three fully-legal ranked moves
