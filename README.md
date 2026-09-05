@@ -1,5 +1,7 @@
 # chess_hint.lua
 
+MADE FOR MATCHA EXTERNAL
+
 Chess move hinter, threat radar, analyzer and autoplay for "Just a baseplate" (Roblox),
 built for the **Matcha Luau executor**.
 
