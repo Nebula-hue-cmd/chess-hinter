@@ -14,6 +14,7 @@
 --   P  show/hide overlay     O  cycle depth: fast <-> deep <-> max
 --   X  engine: CarbonX <-> Sunfish   G  best-move-only
 --   C  my colour: unknown -> White -> Black (YOUR TURN indicator only)
+--   N  sunfish level / max intensity   K  threat warnings ON/OFF
 --
 -- Usage: loadstring(game:HttpGet("<raw url>"))()  (or paste the file).
 -- Re-executing retires the previous instance (newest wins).
@@ -47,7 +48,7 @@ local function ensureServices()
 end
 
 -- Windows VK codes for the hotkeys
-local VK = { P = 80, O = 79, X = 88, G = 71, C = 67 }
+local VK = { P = 80, O = 79, X = 88, G = 71, C = 67, N = 78, K = 75 }
 
 -- ---- settings -----------------------------------------------------------
 local depthMode = "fast"          -- "fast" | "deep" | "max"
@@ -58,16 +59,26 @@ local myColor = nil               -- nil | true (White) | false (Black); C key
 local MODES = {
     fast = { myDepth = 5, oppDepth = 5, budget = 0.6 },
     deep = { myDepth = 8, oppDepth = 8, budget = 1.6 },
-    max  = { myDepth = 10, oppDepth = 8, budget = 6.0 },
 }
 local MODE_ORDER = { "fast", "deep", "max" }
+local MAX_INTENSITIES = {
+    normal  = { myDepth = 10, oppDepth = 8,  budget = 6.0 },
+    hard    = { myDepth = 12, oppDepth = 9,  budget = 12.0 },
+    extreme = { myDepth = 16, oppDepth = 12, budget = 20.0 },
+}
+local MAX_INT_ORDER = { "normal", "hard", "extreme" }
+local maxIntensity = "normal"
 local ENGINE_ORDER = { "carbonx", "sunfish" }
 
 local function effMode()
+    if depthMode == "max" then return MAX_INTENSITIES[maxIntensity] or MAX_INTENSITIES.normal end
     return MODES[depthMode] or MODES.fast
 end
 
+local SF_ORDER = { "blitz", "standard", "strong", "brutal" }
+
 local MAX_ARROWS = 3
+local MAX_THREAT_SLOTS = 5
 
 -- ==== local lastYieldT ====
 local lastYieldT = 0
@@ -2767,6 +2778,69 @@ end
 -- eval that breaks 50% is much bigger at move 5 than at move 50. Returns
 -- (winRate, drawRate) for White.
 
+-- ==== shared resolvers + engine export ====
+local function attackersOfSquare(bd, f, r, byWhite)
+    local out = {}
+    local dir = byWhite and 1 or -1
+    local pr = r - dir
+    if pr >= 1 and pr <= 8 then
+        local nf = f - 1
+        if nf >= 1 then
+            local sq = bd[pr][nf]
+            if sq and sq.white == byWhite and sq.piece == "P" then out[#out+1] = { r = pr, f = nf } end
+        end
+        nf = f + 1
+        if nf <= 8 then
+            local sq = bd[pr][nf]
+            if sq and sq.white == byWhite and sq.piece == "P" then out[#out+1] = { r = pr, f = nf } end
+        end
+    end
+    for _, d in ipairs(KNIGHT_OFF) do
+        local nr, nf = r + d[1], f + d[2]
+        if nr >= 1 and nr <= 8 and nf >= 1 and nf <= 8 then
+            local sq = bd[nr][nf]
+            if sq and sq.white == byWhite and sq.piece == "N" then out[#out+1] = { r = nr, f = nf } end
+        end
+    end
+    for _, d in ipairs(KING_OFF) do
+        local nr, nf = r + d[1], f + d[2]
+        if nr >= 1 and nr <= 8 and nf >= 1 and nf <= 8 then
+            local sq = bd[nr][nf]
+            if sq and sq.white == byWhite and sq.piece == "K" then out[#out+1] = { r = nr, f = nf } end
+        end
+    end
+    for _, d in ipairs(DIAG) do
+        local nr, nf = r + d[1], f + d[2]
+        while nr >= 1 and nr <= 8 and nf >= 1 and nf <= 8 do
+            local sq = bd[nr][nf]
+            if sq then
+                if sq.white == byWhite and (sq.piece == "B" or sq.piece == "Q") then
+                    out[#out+1] = { r = nr, f = nf }
+                end
+                break
+            end
+            nr = nr + d[1]
+            nf = nf + d[2]
+        end
+    end
+    for _, d in ipairs(ORTHO) do
+        local nr, nf = r + d[1], f + d[2]
+        while nr >= 1 and nr <= 8 and nf >= 1 and nf <= 8 do
+            local sq = bd[nr][nf]
+            if sq then
+                if sq.white == byWhite and (sq.piece == "R" or sq.piece == "Q") then
+                    out[#out+1] = { r = nr, f = nf }
+                end
+                break
+            end
+            nr = nr + d[1]
+            nf = nf + d[2]
+        end
+    end
+    return out
+end
+_G.__CCSF = SF
+
 -- ---- detection (2D board UI) --------------------------------------------
 -- Piece buttons are named White_Pawn .. Black_King (colour+type free).
 -- Square buttons are named a8 .. h1 with screen positions (no geometry).
@@ -2786,8 +2860,9 @@ local function findUI()
     }
 end
 
+local boardWhy = ""
 local function readSquares(ui)
-    if not ui.board then return nil end
+    if not ui.board then boardWhy = "no board UI"; return nil end
     local pos = {}
     for _, s in ipairs(ui.board:GetChildren()) do
         local nm = s.Name
@@ -2796,17 +2871,21 @@ local function readSquares(ui)
             if ap then pos[nm] = { x = ap.X, y = ap.Y } end
         end
     end
+    local n = 0
+    for _ in pairs(pos) do n = n + 1 end
+    if n < 60 then boardWhy = "squares " .. n .. "/64"; return nil end
     local a1, h8 = pos["a1"], pos["h8"]
-    if not a1 or not h8 then return nil end
+    if not a1 or not h8 then boardWhy = "corners missing"; return nil end
     -- collapsed/hidden boards stack every square on one pixel: reject them.
     local span = math.abs(a1.x - h8.x) + math.abs(a1.y - h8.y)
-    if span < 200 then return nil end
+    if span < 200 then boardWhy = "board hidden"; return nil end
     local e2, e4 = pos["e2"], pos["e4"]
     local sp = nil
     if e2 and e4 then
         sp = (math.abs(e2.x - e4.x) + math.abs(e2.y - e4.y)) / 2
     end
-    if not sp or sp < 15 or sp > 300 then return nil end
+    if not sp or sp < 15 or sp > 300 then boardWhy = "bad spacing"; return nil end
+    boardWhy = ""
     return { pos = pos, sp = sp }
 end
 
@@ -2899,6 +2978,17 @@ local lastStatus = "starting..."
 local curSq = nil
 local curSp = 60
 local lastClocks = { w = "?", b = "?" }
+-- threat / check / mates / last-move / winbar state
+local showThreats = false
+local thr = {}
+local thrSummary = { n = 0, kingAtk = 0, hang = 0 }
+local inCheckNow = false
+local mates = nil
+local lastMove = nil
+local prevList = nil
+local moveHist = {}
+local winV = 0.5
+local lastVp = { x = 1600, y = 900 }
 
 -- ---- overlay arrows (screen pixels) --------------------------------------
 -- Square buttons report positions; endpoints use their centers. If arrows
@@ -2933,6 +3023,63 @@ local function hideArrow(i)
         a.lbl.Visible = false
     end
 end
+
+-- threat arrows (pink): attacker -> hanging piece, "!" when undefended
+local threatSlots = {}
+for i = 1, MAX_THREAT_SLOTS do
+    local line = Drawing.new("Line")
+    line.Thickness = 2
+    line.Color = Color3.fromRGB(244, 114, 182)
+    line.Visible = false
+    local lbl = Drawing.new("Text")
+    lbl.Size = 16
+    lbl.Center = true
+    lbl.Outline = true
+    lbl.Color = Color3.fromRGB(244, 114, 182)
+    lbl.Visible = false
+    threatSlots[i] = { line = line, lbl = lbl }
+end
+
+local function hideThreat(i)
+    local s = threatSlots[i]
+    if s then
+        s.line.Visible = false
+        s.lbl.Visible = false
+    end
+end
+
+-- last-move arrow (thin slate)
+local lastLine = Drawing.new("Line")
+lastLine.Thickness = 2
+lastLine.Color = Color3.fromRGB(148, 163, 184)
+lastLine.Visible = false
+
+-- check / mate text (top-center)
+local checkText = Drawing.new("Text")
+checkText.Size = 22
+checkText.Font = 11
+checkText.Center = true
+checkText.Outline = true
+checkText.Color = Color3.fromRGB(248, 113, 113)
+checkText.Visible = false
+
+-- win bar (bottom-center): white share + eval
+local barBg = Drawing.new("Square")
+barBg.Filled = true
+barBg.Color = Color3.fromRGB(20, 28, 42)
+barBg.Transparency = 0.25
+barBg.Visible = false
+local barFill = Drawing.new("Square")
+barFill.Filled = true
+barFill.Color = Color3.fromRGB(240, 244, 248)
+barFill.Transparency = 0.1
+barFill.Visible = false
+local barTxt = Drawing.new("Text")
+barTxt.Size = 12
+barTxt.Center = true
+barTxt.Outline = true
+barTxt.Color = Color3.fromRGB(240, 244, 248)
+barTxt.Visible = false
 
 local function setArrow(i, x1, y1, x2, y2, color, label)
     local a = arrows[i]
@@ -2980,7 +3127,7 @@ panelTitle.Outline = true
 panelTitle.Visible = false
 
 local panelRows = {}
-for i = 1, 4 do
+for i = 1, 5 do
     local t = Drawing.new("Text")
     t.Size = 13
     t.Font = 1
@@ -3002,6 +3149,109 @@ local ARROW_COLORS = {
     Color3.fromRGB(56, 189, 248),
 }
 
+-- One pink arrow per own piece the enemy can capture (King first, then
+-- value). Colours are exact here (names), so unlike the old game there is
+-- no army-map ambiguity to corrupt this layer.
+local function collectThreats(bd, side)
+    local out = {}
+    if not showThreats then return out end
+    local pieces = {}
+    for r = 1, 8 do
+        for f = 1, 8 do
+            local sq = bd[r][f]
+            if sq and sq.white == side then
+                pieces[#pieces + 1] = { r = r, f = f, piece = sq.piece,
+                    val = PIECE_VAL[sq.piece] or 0, king = sq.piece == "K" }
+            end
+        end
+    end
+    table.sort(pieces, function(a, b)
+        if a.king ~= b.king then return a.king end
+        return a.val > b.val
+    end)
+    for _, p in ipairs(pieces) do
+        if #out >= MAX_THREAT_SLOTS then break end
+        local atk = attackersOfSquare(bd, p.f, p.r, not side)
+        if #atk > 0 then
+            local defended = #attackersOfSquare(bd, p.f, p.r, side) > 0
+            local best, bestVal = nil, 1e9
+            for _, a in ipairs(atk) do
+                local av = PIECE_VAL[bd[a.r][a.f].piece] or 0
+                if av < bestVal then bestVal = av best = a end
+            end
+            out[#out + 1] = { ar = best.r, af = best.f, tr = p.r, tf = p.f,
+                piece = p.piece, val = p.val, defended = defended }
+        end
+    end
+    return out
+end
+
+-- Tiny classical repertoire (UCI strings, ply 1 = White). Only consulted
+-- once our colour is declared (C key); without it there is no "our move".
+local BOOK_RAW = {
+    { "e2e4", "e7e5", "g1f3", "b8c6", "f1c4" },
+    { "e2e4", "e7e5", "g1f3", "g8f6", "f1c4" },
+    { "e2e4", "e7e5", "g1f3", "d7d6", "d2d4" },
+    { "e2e4", "c7c5", "g1f3", "d7d6", "d2d4" },
+    { "e2e4", "c7c5", "g1f3", "b8c6", "d2d4" },
+    { "e2e4", "e7e6", "d2d4" },
+    { "e2e4", "c7c6", "d2d4" },
+    { "e2e4", "d7d6", "d2d4" },
+    { "e2e4", "g8f6", "e4e5" },
+    { "e2e4", "d7d5", "e4d5" },
+    { "e2e4", "b8c6", "d2d4" },
+    { "d2d4", "d7d5", "c2c4", "e7e6" },
+    { "d2d4", "d7d5", "g1f3", "g8f6" },
+    { "c2c4", "e7e5" },
+    { "g1f3", "d7d5", "c2c4", "e7e6" },
+    { "b1c3", "e7e5" },
+}
+local BOOK = nil
+local function buildBook()
+    if BOOK then return end
+    BOOK = {}
+    for _, line in ipairs(BOOK_RAW) do
+        local l = {}
+        for i, sv in ipairs(line) do
+            l[i] = { fr = tonumber(sv:sub(2, 2)), ff = string.byte(sv:sub(1, 1)) - 96,
+                     tr = tonumber(sv:sub(4, 4)), tf = string.byte(sv:sub(3, 3)) - 96 }
+        end
+        BOOK[#BOOK + 1] = l
+    end
+end
+
+local function findBookMove()
+    if myColor == nil then return nil end
+    buildBook()
+    local n = #moveHist
+    if n == 0 then
+        if myColor then return { 2, 5, 4, 5 } end
+        return nil
+    end
+    local best, bestLen = nil, 0
+    local ourParity = (myColor and 1 or 0)
+    if (n + 1) % 2 ~= ourParity then return nil end
+    for _, line in ipairs(BOOK) do
+        if #line > n and #line > bestLen then
+            local okM = true
+            for i = 1, n do
+                local m = moveHist[i]
+                local w = line[i]
+                if m.fr ~= w.fr or m.ff ~= w.ff or m.tr ~= w.tr or m.tf ~= w.tf then
+                    okM = false
+                    break
+                end
+            end
+            if okM then
+                bestLen = #line
+                local nxt = line[n + 1]
+                best = { nxt.fr, nxt.ff, nxt.tr, nxt.tf }
+            end
+        end
+    end
+    return best
+end
+
 -- ---- background search loop ----------------------------------------------
 task.spawn(function()
     while running do
@@ -3009,12 +3259,20 @@ task.spawn(function()
         local okLoop, errLoop = pcall(function()
             if not ensureServices() then task.wait(1.0) return end
             local ui = findUI()
-            local sq = ui and readSquares(ui)
+            if not ui then
+                paths = nil
+                searching = false
+                haveEval = false
+                lastStatus = "no 2D UI..."
+                task.wait(0.5)
+                return
+            end
+            local sq = readSquares(ui)
             if not sq then
                 paths = nil
                 searching = false
                 haveEval = false
-                lastStatus = "waiting for board..."
+                lastStatus = boardWhy ~= "" and boardWhy or "waiting for board..."
                 task.wait(0.5)
                 return
             end
@@ -3054,6 +3312,40 @@ task.spawn(function()
                 end
             end
             local bd = boardFromList(list)
+            -- last move + history from exact square diffs (names are exact,
+            -- so mover colour needs no inference)
+            if prevList then
+                local oldSq = {}
+                for _, e in ipairs(prevList) do oldSq[e.file .. "," .. e.rank] = e end
+                local newSq = {}
+                for _, e in ipairs(list) do newSq[e.file .. "," .. e.rank] = e end
+                local gone, appeared = {}, {}
+                for key, oe in pairs(oldSq) do
+                    if not newSq[key] then gone[#gone + 1] = oe end
+                end
+                for key, ne in pairs(newSq) do
+                    if not oldSq[key] then appeared[#appeared + 1] = ne end
+                end
+                if #gone == 1 and #appeared == 1 then
+                    lastMove = { fr = gone[1].rank, ff = gone[1].file,
+                        tr = appeared[1].rank, tf = appeared[1].file, white = gone[1].white }
+                    moveHist[#moveHist + 1] = { fr = lastMove.fr, ff = lastMove.ff, tr = lastMove.tr, tf = lastMove.tf }
+                    if #moveHist > 200 then table.remove(moveHist, 1) end
+                elseif #gone == 1 and #appeared == 0 then
+                    local dst = nil
+                    for _, e in ipairs(list) do
+                        local oe = oldSq[e.file .. "," .. e.rank]
+                        if oe and oe.letter ~= e.letter then dst = e break end
+                    end
+                    if dst then
+                        lastMove = { fr = gone[1].rank, ff = gone[1].file,
+                            tr = dst.rank, tf = dst.file, white = gone[1].white }
+                        moveHist[#moveHist + 1] = { fr = lastMove.fr, ff = lastMove.ff, tr = lastMove.tr, tf = lastMove.tf }
+                        if #moveHist > 200 then table.remove(moveHist, 1) end
+                    end
+                end
+            end
+            prevList = list
             -- kings must be exactly one per colour (names are exact, so any
             -- other count means a broken/transient read - hold, don't guess)
             local wK, bK = 0, 0
@@ -3080,6 +3372,10 @@ task.spawn(function()
                     haveEval = false
                     searching = false
                 end
+                thr = {}
+                thrSummary = { n = 0, kingAtk = 0, hang = 0 }
+                inCheckNow = false
+                mates = nil
                 if turnWhite == nil then
                     lastStatus = mine and "waiting for clock..." or "not your board"
                 elseif not sane then
@@ -3091,6 +3387,17 @@ task.spawn(function()
                 paths = nil
                 searching = true
                 lastStatus = "thinking..."
+                -- threats + check snapshot for this position (moves only
+                -- change on fresh boards, so computing here stays live)
+                inCheckNow = inCheck(bd, turnWhite)
+                thr = collectThreats(bd, turnWhite)
+                local tn, tk, th = 0, 0, 0
+                for _, t in ipairs(thr) do
+                    tn = tn + 1
+                    if t.piece == "K" then tk = tk + 1 end
+                    if not t.defended then th = th + 1 end
+                end
+                thrSummary = { n = tn, kingAtk = tk, hang = th }
                 local scored = nil
                 if engineName == "sunfish" then
                     scored = runSunfish(bd, turnWhite, m.budget)
@@ -3108,6 +3415,7 @@ task.spawn(function()
                     end
                 end
                 if scored and #scored > 0 then
+                    mates = nil
                     local limit = math.min(onlyBest and 1 or MAX_ARROWS, #scored)
                     paths = {}
                     for i = 1, limit do
@@ -3124,14 +3432,37 @@ task.spawn(function()
                         end
                         paths[i] = { mv = mv, score = sc.score, tier = tier, label = txt }
                     end
+                    -- opening book override (needs declared colour via C key)
+                    local bookMove = findBookMove()
+                    if bookMove and not isLegalMove(bd, bookMove, turnWhite) then
+                        bookMove = nil
+                    end
+                    if bookMove then
+                        local balg = toAlg(bookMove[1], bookMove[2], bookMove[3], bookMove[4], nil)
+                        paths[1] = { mv = bookMove, score = scored[1].score, tier = "BEST",
+                            label = (turnWhite and "W: " or "B: ") .. balg .. " book" }
+                    end
                     local whiteCp = turnWhite and scored[1].score or -scored[1].score
                     if math.abs(whiteCp) > 1500 then whiteCp = (whiteCp > 0 and 1500 or -1500) end
                     evalWhite = whiteCp
+                    winV = 1 / (1 + 10 ^ (-whiteCp / 400))
                     haveEval = true
                 else
                     paths = nil
+                    local legal = genLegalMoves(bd, turnWhite)
+                    if #legal == 0 then
+                        if inCheck(bd, turnWhite) then
+                            mates = "checkmate"
+                            evalWhite = turnWhite and -1500 or 1500
+                        else
+                            mates = "stalemate"
+                            evalWhite = 0
+                        end
+                    else
+                        mates = nil
+                    end
+                    winV = 1 / (1 + 10 ^ (-evalWhite / 400))
                     haveEval = true
-                    evalWhite = 0
                 end
                 searching = false
                 searchedOnce = true
@@ -3153,6 +3484,12 @@ task.spawn(function()
         if _G.__CCHESS_GEN ~= MY_GEN then break end
         if not VISIBLE then
             for i = 1, MAX_ARROWS do hideArrow(i) end
+            for i = 1, MAX_THREAT_SLOTS do hideThreat(i) end
+            lastLine.Visible = false
+            checkText.Visible = false
+            barBg.Visible = false
+            barFill.Visible = false
+            barTxt.Visible = false
             hidePanel()
         else
             local shown = 0
@@ -3174,15 +3511,68 @@ task.spawn(function()
                 end
             end
             for i = shown + 1, MAX_ARROWS do hideArrow(i) end
-            -- panel (top-left, below the topbar)
-            local px, py = 16, 84
+            -- threat arrows (pink attacker -> target, "!" when undefended)
+            local nThreat = 0
+            if showThreats and curSq then
+                for i = 1, math.min(MAX_THREAT_SLOTS, #thr) do
+                    local t = thr[i]
+                    local a = curSq.pos[string.char(t.af + 96) .. t.ar]
+                    local c = curSq.pos[string.char(t.tf + 96) .. t.tr]
+                    if a and c then
+                        nThreat = nThreat + 1
+                        local slot = threatSlots[nThreat]
+                        local ax, ay = a.x + curSp / 2, a.y + curSp / 2 + YOFF
+                        local cx, cy = c.x + curSp / 2, c.y + curSp / 2 + YOFF
+                        slot.line.From = Vector2.new(ax, ay)
+                        slot.line.To = Vector2.new(cx, cy)
+                        slot.line.Visible = true
+                        if t.defended then
+                            slot.lbl.Visible = false
+                        else
+                            slot.lbl.Text = "!"
+                            slot.lbl.Position = Vector2.new((ax + cx) / 2, (ay + cy) / 2 - 22)
+                            slot.lbl.Visible = true
+                        end
+                    end
+                end
+            end
+            for i = nThreat + 1, MAX_THREAT_SLOTS do hideThreat(i) end
+            -- last-move arrow (thin slate)
+            if lastMove and curSq then
+                local a = curSq.pos[string.char(lastMove.ff + 96) .. lastMove.fr]
+                local c = curSq.pos[string.char(lastMove.tf + 96) .. lastMove.tr]
+                if a and c then
+                    lastLine.From = Vector2.new(a.x + curSp / 2, a.y + curSp / 2 + YOFF)
+                    lastLine.To = Vector2.new(c.x + curSp / 2, c.y + curSp / 2 + YOFF)
+                    lastLine.Visible = true
+                else
+                    lastLine.Visible = false
+                end
+            else
+                lastLine.Visible = false
+            end
+            -- viewport for right-side panel / top-center / bottom-center
+            local vpx, vpy = 1600, 900
+            local cam = workspace and workspace.CurrentCamera
+            local vs = cam and cam.ViewportSize
+            if vs and vs.X and vs.X > 100 then vpx = vs.X end
+            if vs and vs.Y and vs.Y > 100 then vpy = vs.Y end
+            lastVp.x, lastVp.y = vpx, vpy
+            -- panel (right side, below the topbar)
+            local px, py = vpx - 244, 84
             panelBg.Position = Vector2.new(px, py)
-            panelBg.Size = Vector2.new(228, 118)
+            panelBg.Size = Vector2.new(228, 139)
             panelBg.Visible = true
             panelTitle.Text = "Club Hinter"
             panelTitle.Position = Vector2.new(px + 10, py + 6)
             panelTitle.Visible = true
             local eng = (engineName == "sunfish") and "SUNFISH" or "CARBONX"
+            local det = string.upper(depthMode)
+            if engineName == "sunfish" and _G.__CCSF and _G.__CCSF.level then
+                det = det .. " " .. string.upper(_G.__CCSF.level)
+            elseif depthMode == "max" then
+                det = det .. " " .. string.upper(maxIntensity)
+            end
             local tn = (turnWhite == nil) and "?" or (turnWhite and "White" or "Black")
             if myColor ~= nil and turnWhite ~= nil then
                 tn = tn .. (turnWhite == myColor and " (YOU)" or " (opp)")
@@ -3192,11 +3582,15 @@ task.spawn(function()
                 local own = myColor == nil and evalWhite or (myColor and evalWhite or -evalWhite)
                 evtxt = string.format("  %+.1f", own / 100)
             end
+            local stxt = searching and "thinking..." or lastStatus
+            if mates then stxt = mates end
+            local threatRow = showThreats and ("Threats ON" .. (thrSummary.n > 0 and ("  RISK x" .. thrSummary.n) or "")) or "Threats OFF [K]"
             local rows = {
-                eng .. " " .. string.upper(depthMode) .. (onlyBest and " best-only" or ""),
+                eng .. " " .. det .. (onlyBest and " best-only" or ""),
                 "W " .. lastClocks.w .. "  B " .. lastClocks.b,
                 tn .. " to move" .. evtxt,
-                searching and "thinking..." or lastStatus,
+                threatRow,
+                stxt,
             }
             local y = py + 28
             for i, txt in ipairs(rows) do
@@ -3205,10 +3599,53 @@ task.spawn(function()
                 panelRows[i].Visible = true
                 y = y + 21
             end
+            -- check / mate text (top-center)
+            if mates == "checkmate" then
+                checkText.Text = "CHECKMATE"
+                checkText.Position = Vector2.new(vpx / 2, 120)
+                checkText.Visible = true
+            elseif mates == "stalemate" then
+                checkText.Text = "STALEMATE"
+                checkText.Position = Vector2.new(vpx / 2, 120)
+                checkText.Visible = true
+            elseif inCheckNow and (math.floor(tick() * 2) % 2 == 0) then
+                checkText.Text = "CHECK!"
+                checkText.Position = Vector2.new(vpx / 2, 120)
+                checkText.Visible = true
+            else
+                checkText.Visible = false
+            end
+            -- win bar (bottom-center): white share + eval
+            if haveEval then
+                local bw, bh = 300, 10
+                local bx, by = (vpx - bw) / 2, vpy - 64
+                barBg.Position = Vector2.new(bx, by)
+                barBg.Size = Vector2.new(bw, bh)
+                barBg.Visible = true
+                local w = math.max(0, math.min(1, winV)) * bw
+                barFill.Position = Vector2.new(bx, by)
+                barFill.Size = Vector2.new(w, bh)
+                barFill.Visible = true
+                local pct = math.floor(winV * 100 + 0.5)
+                local own = myColor == nil and evalWhite or (myColor and evalWhite or -evalWhite)
+                barTxt.Text = "W " .. pct .. "%  " .. string.format("%+.1f", own / 100)
+                barTxt.Position = Vector2.new(bx + bw / 2, by - 20)
+                barTxt.Visible = true
+            else
+                barBg.Visible = false
+                barFill.Visible = false
+                barTxt.Visible = false
+            end
         end
         task.wait(0.08)
     end
     for i = 1, MAX_ARROWS do hideArrow(i) end
+    for i = 1, MAX_THREAT_SLOTS do hideThreat(i) end
+    lastLine.Visible = false
+    checkText.Visible = false
+    barBg.Visible = false
+    barFill.Visible = false
+    barTxt.Visible = false
     hidePanel()
 end)
 
@@ -3218,7 +3655,8 @@ task.spawn(function()
     local keys = {
         { v = VK.P, name = "P" }, { v = VK.O, name = "O" },
         { v = VK.X, name = "X" }, { v = VK.G, name = "G" },
-        { v = VK.C, name = "C" },
+        { v = VK.C, name = "C" }, { v = VK.N, name = "N" },
+        { v = VK.K, name = "K" },
     }
     while running do
         if _G.__CCHESS_GEN ~= MY_GEN then break end
@@ -3259,6 +3697,33 @@ task.spawn(function()
                     else myColor = nil end
                     local s = (myColor == nil) and "unknown" or (myColor and "White" or "Black")
                     print("[Club Hinter] I play:", s)
+                elseif k.v == VK.N then
+                    if engineName == "sunfish" then
+                        local sf = _G.__CCSF
+                        if sf then
+                            for i, sl in ipairs(SF_ORDER) do
+                                if sl == sf.level then
+                                    sf.level = SF_ORDER[(i % #SF_ORDER) + 1]
+                                    break
+                                end
+                            end
+                            lastSearchKey = ""
+                            print("[Club Hinter] Sunfish level:", sf.level)
+                        end
+                    elseif depthMode == "max" then
+                        for i, mi in ipairs(MAX_INT_ORDER) do
+                            if mi == maxIntensity then
+                                maxIntensity = MAX_INT_ORDER[(i % #MAX_INT_ORDER) + 1]
+                                break
+                            end
+                        end
+                        print("[Club Hinter] Max intensity:", maxIntensity)
+                    else
+                        print("[Club Hinter] Max intensity: switch to MAX mode (O) first.")
+                    end
+                elseif k.v == VK.K then
+                    showThreats = not showThreats
+                    print("[Club Hinter] Threat warnings:", showThreats and "ON" or "OFF")
                 end
             elseif not down then
                 held[k.v] = false
@@ -3269,4 +3734,4 @@ task.spawn(function()
 end)
 
 print("[Club Hinter] Loaded v1")
-print("[Club Hinter] Keys: P hide | O depth (fast|deep|max) | X engine | G best-only | C my colour")
+print("[Club Hinter] Keys: P hide | O depth | X engine | G best-only | C colour | N level | K threats")
