@@ -1,13 +1,15 @@
 -- Word Sprint v1 for "Finish The Word!" (Roblox) - Matcha VM
--- Reads "Type a word starting with X" prompts, picks a valid word nobody has
--- used from a baked dictionary, types it into chat and sends it. Exactly one
--- answer per prompt. Wrong words are never risked (dictionary-only picks);
--- repeats are never risked (own sends + chat-observed words are excluded).
--- Solving is OFF by default: toggle it when a round is live.
+-- Reads "Type a word starting with X" prompts (one or more letters) and
+-- suggests a valid, unused word from a baked dictionary. Nothing is typed
+-- automatically: press F5 to auto-complete the suggestion into the chat box,
+-- then YOU press Enter to send it. Wrong/repeated words are never risked by
+-- the bot (it only ever fills exact dictionary words, and never sends).
+-- The prompt reader ignores your own typing (it only adopts stable readings).
 --
 -- Keys (F-keys so typing never triggers them):
---   F6 auto-answer | F7 show/hide | F4 reset memory | F8 compact/full
--- Panel (mini by default): prompt -> word, status.
+--   F6 solver on/off | F5 complete suggestion into chat | F7 show/hide
+--   F4 reset memory | F8 compact/full
+-- Panel (mini by default): prompt -> suggestion, status.
 
 _G.__SPRINT_GEN = (_G.__SPRINT_GEN or 0) + 1
 local MY_GEN = _G.__SPRINT_GEN
@@ -31,8 +33,8 @@ local function ensureServices()
     return lp ~= nil
 end
 
-local VK = { SOLVE = 117, HIDE = 118, RESET = 115, COMPACT = 119 }
-local K_SLASH, K_ENTER, K_ESC = 191, 13, 27
+local VK = { SOLVE = 117, COMPLETE = 116, HIDE = 118, RESET = 115, COMPACT = 119 }
+local K_SLASH = 191
 
 local function toast(msg)
     pcall(function() notify("Word Sprint", msg, 2) end)
@@ -81,20 +83,14 @@ buildDict()
 DICT_LETTER = nil
 
 -- state
-local used = {} -- used[WORD] = true (own sends + chat-observed)
-local answeredKey = nil
-local sending = false
-local lastSendT = 0
+local used = {} -- used[WORD] = true (chat-observed sends)
 local status = "starting..."
 local lastWord = "-"
 local lastPrompt = "-"
-local lastResult = "-"
-local sendAttempts = 0
-local sendLog = {}
-local function slog(s)
-    sendLog[#sendLog + 1] = s
-    if #sendLog > 10 then table.remove(sendLog, 1) end
-end
+local filledFor = nil -- prefix..">"..word already filled this prompt
+local rawPrev = nil
+local adopted = nil -- stable prompt only (your typing never adopts)
+local stableNow = false
 
 local function markUsed(word)
     if type(word) ~= "string" then return end
@@ -209,63 +205,26 @@ local function chatHasMine(word)
     return false
 end
 
-local function sendWord(word, prefix)
-    sending = true
-    sendAttempts = sendAttempts + 1
+local function fillWord(word, prefix)
     task.spawn(function()
-        local done = function(s)
-            status = s
-            lastResult = s
-            sending = false
-        end
         local alive = function() return _G.__SPRINT_GEN == MY_GEN end
-        if not alive() then sending = false return end
-        slog("esc")
-        pcall(function() keypress(K_ESC) end)
-        task.wait(0.25)
-        if not alive() then sending = false return end
-        slog("slash")
+        if not alive() then return end
         pcall(function() keypress(K_SLASH) end)
         task.wait(0.6)
-        if not alive() then sending = false return end
-        local p = readPrompt()
-        if not p or p.prefix ~= prefix then
-            pcall(function() keypress(K_ESC) end)
-            slog("abort-moved")
-            done("prompt moved, aborted")
+        if not alive() then return end
+        -- re-verify: same STABLE prompt still adopted (never fill mid-typing)
+        if not adopted or adopted.prefix ~= prefix then
+            status = 'prompt moved, aborted'
             return
         end
-        slog("type:" .. #word)
-        for i = 1, #word do
-            if not alive() then sending = false return end
-            pcall(function() keypress(string.byte(word, i)) end)
-            task.wait(0.07)
+        for k = 1, #word do
+            if not alive() then return end
+            pcall(function() keypress(string.byte(word, k)) end)
+            task.wait(0.05)
         end
-        task.wait(0.25)
-        if not alive() then sending = false return end
-        slog("enter")
-        pcall(function() keypress(K_ENTER) end)
-        local t0 = tick()
-        local ok = false
-        while tick() - t0 < 4 do
-            if not alive() then sending = false return end
-            if chatHasMine(word) then ok = true break end
-            task.wait(0.3)
-        end
-        markUsed(word)
-        if ok then
-            lastSendT = tick()
-            answeredKey = prefix
-            slog("verified")
-            done("sent " .. word)
-            print("[Sprint] sent: " .. word)
-        else
-            pcall(function() keypress(K_ESC) end)
-            answeredKey = prefix
-            slog("miss")
-            done("unverified: " .. word)
-            print("[Sprint] unverified: " .. word)
-        end
+        filledFor = prefix .. '>' .. word
+        status = 'filled ' .. word .. ' - Enter to send'
+        print('[Sprint] filled: ' .. word)
     end)
 end
 
@@ -302,8 +261,6 @@ local view = { line1 = "...", line2 = "", solveTxt = "OFF" }
 _G.__SprintState = function()
     return "solve=" .. tostring(SOLVE) .. " prompt=" .. lastPrompt
         .. " word=" .. lastWord .. " status=" .. status
-        .. " lastResult=" .. lastResult .. " attempts=" .. sendAttempts
-        .. " slog=" .. table.concat(sendLog, "|")
         .. " loops=" .. HEALTH.loops .. " renders=" .. HEALTH.renders
         .. " keys=" .. HEALTH.keys .. " err=" .. HEALTH.err
         .. " gen=" .. tostring(_G.__SPRINT_GEN)
@@ -317,30 +274,36 @@ task.spawn(function()
         local okLoop, errLoop = pcall(function()
             if not ensureServices() then task.wait(1.0) return end
             local p = readPrompt()
-            if p then
-                lastPrompt = p.prefix
-                observeChat()
-                if SOLVE and not sending and answeredKey ~= p.prefix
-                    and tick() - lastSendT > 3.5 then
-                    local w = pickWord(p.prefix)
+            local raw = p and p.prefix or "-"
+            local settled = (raw == rawPrev)
+            rawPrev = raw
+            if settled then adopted = p end
+            stableNow = settled
+            observeChat()
+            if adopted then
+                lastPrompt = adopted.prefix
+                if not SOLVE then
+                    status = "armed OFF (F6)"
+                elseif not settled then
+                    status = "typing hold..."
+                else
+                    local w = pickWord(adopted.prefix)
                     if w then
                         lastWord = w
-                        status = "answering " .. w .. "..."
-                        sendWord(w, p.prefix)
+                        if filledFor == adopted.prefix .. ">" .. w then
+                            status = "filled " .. w .. " - Enter to send"
+                        else
+                            status = "F5 completes: " .. w
+                        end
                     else
-                        status = "no fresh word for " .. p.prefix
+                        status = "no fresh word for " .. adopted.prefix
                     end
-                elseif not SOLVE then
-                    status = "armed OFF (F6)"
-                elseif sending then
-                    status = status
-                elseif answeredKey == p.prefix then
-                    status = "answered " .. p.prefix .. ", waiting next"
                 end
             else
-                if answeredKey ~= nil then answeredKey = nil end
                 lastPrompt = "-"
-                status = "waiting for prompt..."
+                filledFor = nil
+                if not SOLVE then status = "armed OFF (F6)"
+                else status = "waiting for prompt..." end
             end
             view.line1 = lastPrompt .. " -> " .. lastWord
             view.line2 = status
@@ -406,7 +369,7 @@ end)
 -- ---- input -----------------------------------------------------------------
 task.spawn(function()
     local held = {}
-    local keys = { VK.SOLVE, VK.HIDE, VK.RESET, VK.COMPACT }
+    local keys = { VK.SOLVE, VK.COMPLETE, VK.HIDE, VK.RESET, VK.COMPACT }
     while running do
         if _G.__SPRINT_GEN ~= MY_GEN then break end
         for _, code in ipairs(keys) do
@@ -417,14 +380,33 @@ task.spawn(function()
                 if code == VK.SOLVE then
                     SOLVE = not SOLVE
                     _G.__SPRINT_SOLVE = SOLVE
-                    print("[Sprint] auto-answer: " .. (SOLVE and "ON" or "OFF"))
-                    toast("auto-answer " .. (SOLVE and "ON" or "OFF"))
+                    print("[Sprint] solver: " .. (SOLVE and "ON" or "OFF"))
+                    toast("solver " .. (SOLVE and "ON" or "OFF"))
+                elseif code == VK.COMPLETE then
+                    if not SOLVE then
+                        toast("F6 solver first")
+                    elseif not adopted then
+                        toast("no prompt")
+                    elseif not stableNow then
+                        status = "hold - clear the box first"
+                        toast("clear the box first")
+                    elseif filledFor == adopted.prefix .. ">" .. lastWord then
+                        toast("already filled")
+                    elseif lastWord == "-" then
+                        toast("no suggestion yet")
+                    else
+                        print("[Sprint] completing: " .. lastWord)
+                        fillWord(lastWord, adopted.prefix)
+                    end
                 elseif code == VK.HIDE then
                     VISIBLE = not VISIBLE
                     print("[Sprint] overlay: " .. tostring(VISIBLE))
                 elseif code == VK.RESET then
                     used = {}
-                    answeredKey = nil
+                    adopted = nil
+                    rawPrev = nil
+                    filledFor = nil
+                    lastWord = "-"
                     print("[Sprint] memory reset")
                     toast("memory reset")
                 elseif code == VK.COMPACT then
@@ -440,4 +422,4 @@ task.spawn(function()
 end)
 
 print("[Sprint] Word Sprint v1 loaded")
-print("[Sprint] Keys: F6 answer | F7 hide | F4 reset | F8 compact")
+print("[Sprint] Keys: F6 solve | F5 complete | F7 hide | F4 reset | F8 compact")
