@@ -2876,6 +2876,7 @@ do
     local function dbg(s)
         if s ~= dbgLast then dbgLast = s print("[RoDbg] " .. s) end
     end
+    RO.health = { scans = 0, renders = 0, keys = 0, err = "" }
 
     local BACK_NORM = { "R", "N", "B", "Q", "K", "B", "N", "R" }
     local BACK_MIRR = { "R", "N", "B", "K", "Q", "B", "N", "R" }
@@ -3086,6 +3087,7 @@ do
     end
 
     local function readPieces(ui, sq)
+        RO.health.scans = RO.health.scans + 1
         local occ = occSquares(ui, sq)
         if #occ == 0 then
             emissionKnown = (prevEmission ~= nil and #prevEmission > 0)
@@ -3243,6 +3245,9 @@ do
             .. " wb=" .. tostring(s.wb) .. " known=" .. tostring(emissionKnown)
             .. " occ=" .. occN .. " sqn=" .. sqN .. " why=" .. boardWhyPub
             .. " hist=" .. #hist .. " hlkey=" .. tostring(lastHLKey)
+            .. " scans=" .. RO.health.scans .. " renders=" .. RO.health.renders
+            .. " keys=" .. RO.health.keys .. " err=" .. RO.health.err
+            .. " gen=" .. tostring(_G.__RCHESS_GEN)
     end
 end
 local function boardFromList(list)
@@ -3735,6 +3740,7 @@ task.spawn(function()
             task.wait(0.5)
         end)
         if not okLoop then
+            RO.health.err = tostring(errLoop):sub(1, 120)
             print("[Ro Hinter] loop error (recovering): " .. tostring(errLoop))
             lastSearchKey = ""
             searching = false
@@ -3747,6 +3753,7 @@ end)
 task.spawn(function()
     while running do
         if _G.__RCHESS_GEN ~= MY_GEN then break end
+        RO.health.renders = RO.health.renders + 1
         if not VISIBLE then
             for i = 1, MAX_ARROWS do hideArrow(i) end
             for i = 1, MAX_THREAT_SLOTS do hideThreat(i) end
@@ -3932,6 +3939,7 @@ task.spawn(function()
             local down = iskeypressed(k.v)
             if down and not held[k.v] then
                 held[k.v] = true
+                RO.health.keys = RO.health.keys + 1
                 if k.v == VK.P then
                     VISIBLE = not VISIBLE
                     print("[Ro Hinter] Visibility:", VISIBLE)
@@ -4001,5 +4009,5 @@ task.spawn(function()
     end
 end)
 
-print("[Ro Hinter] v1.2dbg (RoChess!) loaded")
+print("[Ro Hinter] v1.3dbg (RoChess!) loaded")
 print("[Ro Hinter] Keys: P hide | O depth | X engine | G best-only | C color | N level | K threats")
