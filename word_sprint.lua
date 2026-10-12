@@ -6,18 +6,32 @@
 -- the bot (it only ever fills exact dictionary words, and never sends).
 -- The prompt reader ignores your own typing (it only adopts stable readings).
 --
--- Keys (F-keys so typing never triggers them):
---   F6 solver on/off | F5 complete suggestion into chat | F7 show/hide
---   F4 reset memory | F8 compact/full
--- Panel (mini by default): prompt -> suggestion, status.
+-- Keys (F-keys so typing never triggers them; all rebindable via F1):
+--   F6 solver on/off | F5 complete suggestion into chat | F3 skip word
+--   F7 show/hide | F4 reset memory | F8 compact/full | F1 rebind keys
+-- Panel (control panel by default): suggestion, toggles, used count, hints.
 
 _G.__SPRINT_GEN = (_G.__SPRINT_GEN or 0) + 1
 local MY_GEN = _G.__SPRINT_GEN
 local running = true
 local VISIBLE = true
 local SOLVE = _G.__SPRINT_SOLVE or false
-local COMPACT = true
+local COMPACT = false -- full control panel by default
 local HEALTH = { loops = 0, renders = 0, keys = 0, err = "" }
+local USED_FILE = "sprint_used.txt"
+local CFG_FILE = "sprint_cfg.txt"
+local usedCount = 0
+local capturing = nil -- rebind action name or nil
+local capArmed = false
+local capT0 = 0
+local REBIND_ORDER = { "SOLVE", "COMPLETE", "SKIP", "HIDE", "RESET", "COMPACT" }
+local SCANCODES = {}
+do
+    for c = 65, 90 do SCANCODES[#SCANCODES + 1] = c end
+    for _, c in ipairs({ 112, 113, 114, 115, 116, 117, 118, 119, 121, 123 }) do
+        SCANCODES[#SCANCODES + 1] = c
+    end
+end
 
 local Players = nil
 local lp = nil
@@ -33,8 +47,56 @@ local function ensureServices()
     return lp ~= nil
 end
 
-local VK = { SOLVE = 117, COMPLETE = 116, HIDE = 118, RESET = 115, COMPACT = 119, SKIP = 114 }
 local K_SLASH = 191
+-- live binds (rebindable via F1, persisted to file); F9/F11 never offered
+local BINDS = { SOLVE = 117, COMPLETE = 116, SKIP = 114, HIDE = 118, RESET = 115, COMPACT = 119 }
+
+local function bindCodeOk(c)
+    if c >= 65 and c <= 90 then return true end
+    if c == 112 or c == 113 or c == 114 or c == 115 or c == 116
+        or c == 117 or c == 118 or c == 119 or c == 121 or c == 123 then
+        return true
+    end
+    return false
+end
+
+local function keyName(c)
+    if c >= 112 and c <= 123 then return "F" .. (c - 111) end
+    if c >= 65 and c <= 90 then return string.char(c) end
+    return "?"
+end
+
+local function saveCfg()
+    local parts = {}
+    for _, act in ipairs(REBIND_ORDER) do
+        parts[#parts + 1] = act .. "=" .. tostring(BINDS[act] or 0)
+    end
+    parts[#parts + 1] = "COMPACT=" .. (COMPACT and "1" or "0")
+    pcall(function() writefile(CFG_FILE, table.concat(parts, "\n")) end)
+end
+
+local function loadAll()
+    local okU, txt = pcall(function() return readfile(USED_FILE) end)
+    if okU and type(txt) == "string" then
+        for w in string.gmatch(txt, "([A-Z]+)") do
+            if #w >= 2 and #w <= 15 and not used[w] and usedCount < 3000 then
+                used[w] = true
+                usedCount = usedCount + 1
+            end
+        end
+    end
+    local okC, cfg = pcall(function() return readfile(CFG_FILE) end)
+    if okC and type(cfg) == "string" then
+        for k, v in string.gmatch(cfg, "([A-Z]+)=(%d+)") do
+            local n = tonumber(v)
+            if k == "COMPACT" then
+                COMPACT = (n == 1)
+            elseif BINDS[k] ~= nil and n and bindCodeOk(n) then
+                BINDS[k] = n
+            end
+        end
+    end
+end
 
 local function toast(msg)
     pcall(function() notify("Word Sprint", msg, 2) end)
@@ -95,7 +157,12 @@ local function markUsed(word)
     local w = string.upper(word)
     if #w < 2 or #w > 15 then return end
     if not string.match(w, "^[A-Z]+$") then return end
+    if used[w] then return end
     used[w] = true
+    usedCount = usedCount + 1
+    if usedCount <= 3000 then
+        pcall(function() appendfile(USED_FILE, w .. "\n") end)
+    end
 end
 
 -- pure: same prompt + same used-set always returns the same word.
@@ -176,7 +243,8 @@ local function observeChat()
         if d.ClassName == "TextLabel" and d.Name == "BodyText" then
             local ok, t = pcall(function() return d.Text end)
             if ok and type(t) == "string" then
-                local w = string.match(t, "^%s*([A-Za-z]+)%s*$")
+                -- single words, tolerating trailing punctuation ("EEL!", "oh...")
+                local w = string.match(t, "^%s*([A-Za-z]+)[^A-Za-z]*$")
                 if w and #w >= 2 and #w <= 15 then markUsed(w) end
             end
         end
@@ -263,6 +331,7 @@ _G.__SprintState = function()
 end
 
 -- ---- main loop -------------------------------------------------------------
+loadAll()
 task.spawn(function()
     while running do
         if _G.__SPRINT_GEN ~= MY_GEN then break end
@@ -328,22 +397,26 @@ task.spawn(function()
             local vs = cam and cam.ViewportSize
             if vs and vs.X and vs.X > 100 then vpx = vs.X end
             if vs and vs.Y and vs.Y > 100 then vpy = vs.Y end
-            local px, py = vpx - 264, 84
+            local px, py = vpx - 304, 84
             panelBg.Position = Vector2.new(px, py)
             panelTitle.Text = "Sprint [" .. view.solveTxt .. "]"
             panelTitle.Position = Vector2.new(px + 10, py + 6)
             panelTitle.Visible = true
             local rows
             if COMPACT then
-                panelBg.Size = Vector2.new(264, 56)
+                panelBg.Size = Vector2.new(288, 56)
                 panelBg.Visible = true
-                rows = { view.line1, view.line2 }
+                rows = { view.line1, string.sub(view.line2, 1, 40) }
             else
-                panelBg.Size = Vector2.new(264, 100)
+                panelBg.Size = Vector2.new(288, 142)
                 panelBg.Visible = true
-                local uc = 0
-                for _ in pairs(used) do uc = uc + 1 end
-                rows = { view.line1, view.line2, "used words: " .. uc, "F6 solve F8 full" }
+                rows = {
+                    view.line1,
+                    "Solve: " .. (SOLVE and "ON" or "OFF") .. " (" .. keyName(BINDS.SOLVE) .. ")",
+                    string.sub(view.line2, 1, 40),
+                    "used " .. usedCount .. " | F1 rebind keys",
+                    "F5 fill F3 skip F4 reset",
+                }
             end
             local y = py + 28
             for i = 1, 5 do
@@ -362,67 +435,119 @@ task.spawn(function()
     hidePanel()
 end)
 
--- ---- input -----------------------------------------------------------------
+-- ---- input (keyboard-driven panel: binds rebindable, persisted) ------------
 task.spawn(function()
     local held = {}
-    local keys = { VK.SOLVE, VK.COMPLETE, VK.HIDE, VK.RESET, VK.COMPACT, VK.SKIP }
+    local ORDER = { "SOLVE", "COMPLETE", "SKIP", "HIDE", "RESET", "COMPACT" }
     while running do
         if _G.__SPRINT_GEN ~= MY_GEN then break end
-        for _, code in ipairs(keys) do
-            local down = iskeypressed(code)
-            if down and not held[code] then
-                held[code] = true
-                HEALTH.keys = HEALTH.keys + 1
-                if code == VK.SOLVE then
-                    SOLVE = not SOLVE
-                    _G.__SPRINT_SOLVE = SOLVE
-                    print("[Sprint] solver: " .. (SOLVE and "ON" or "OFF"))
-                    toast("solver " .. (SOLVE and "ON" or "OFF"))
-                elseif code == VK.COMPLETE then
-                    if not SOLVE then
-                        toast("F6 solver first")
-                    elseif not adopted then
-                        toast("no prompt")
-                    elseif not stableNow then
-                        status = "hold - clear the box first"
-                        toast("clear the box first")
-                    elseif filledFor == adopted.prefix .. ">" .. lastWord then
-                        toast("already filled")
-                    elseif lastWord == "-" then
-                        toast("no suggestion yet")
-                    else
-                        print("[Sprint] completing: " .. lastWord)
-                        fillWord(lastWord, adopted.prefix)
-                    end
-                elseif code == VK.HIDE then
-                    VISIBLE = not VISIBLE
-                    print("[Sprint] overlay: " .. tostring(VISIBLE))
-                elseif code == VK.RESET then
-                    used = {}
-                    adopted = nil
-                    rawPrev = nil
-                    filledFor = nil
-                    lastWord = "-"
-                    print("[Sprint] memory reset")
-                    toast("memory reset")
-                elseif code == VK.COMPACT then
-                    COMPACT = not COMPACT
-                    print("[Sprint] compact: " .. tostring(COMPACT))
-                elseif code == VK.SKIP then
-                    if lastWord ~= "-" then
-                        used[lastWord] = true
-                        filledFor = nil
-                        print("[Sprint] skipped: " .. lastWord)
-                        toast("skipped " .. lastWord)
+        -- F1: rebind mode (fixed key, never rebound itself)
+        local f1 = iskeypressed(112)
+        if f1 and not held[112] then
+            held[112] = true
+            if capturing then
+                capturing = nil
+                toast("rebind cancelled")
+            else
+                capturing = REBIND_ORDER[1]
+                capArmed = false
+                capT0 = tick()
+                toast("press key for " .. capturing)
+            end
+        elseif not f1 then
+            held[112] = false
+        end
+        if capturing then
+            local anyDown = false
+            for _, c in ipairs(SCANCODES) do
+                if iskeypressed(c) then anyDown = true break end
+            end
+            if not anyDown then capArmed = true end
+            if capArmed then
+                for _, c in ipairs(SCANCODES) do
+                    if iskeypressed(c) then
+                        BINDS[capturing] = c
+                        saveCfg()
+                        print("[Sprint] bind " .. capturing .. " -> " .. keyName(c))
+                        toast(capturing .. " = " .. keyName(c))
+                        local nextAct = nil
+                        for i, a in ipairs(REBIND_ORDER) do
+                            if a == capturing then nextAct = REBIND_ORDER[i + 1] break end
+                        end
+                        capturing = nextAct
+                        capArmed = false
+                        capT0 = tick()
+                        if capturing then toast("press key for " .. capturing)
+                        else toast("rebind done") end
+                        break
                     end
                 end
-            elseif not down then
-                held[code] = false
+            end
+            if capturing and tick() - capT0 > 12 then
+                capturing = nil
+                toast("rebind timed out")
+            end
+        else
+            for _, act in ipairs(ORDER) do
+                local code = BINDS[act]
+                if code ~= 112 then -- F1 reserved for rebind mode
+                    local down = iskeypressed(code)
+                if down and not held[code] then
+                    held[code] = true
+                    HEALTH.keys = HEALTH.keys + 1
+                    if act == "SOLVE" then
+                        SOLVE = not SOLVE
+                        _G.__SPRINT_SOLVE = SOLVE
+                        print("[Sprint] solver: " .. (SOLVE and "ON" or "OFF"))
+                        toast("solver " .. (SOLVE and "ON" or "OFF"))
+                    elseif act == "COMPLETE" then
+                        if not SOLVE then
+                            toast("solver first")
+                        elseif not adopted then
+                            toast("no prompt")
+                        elseif not stableNow then
+                            status = "hold - clear the box first"
+                            toast("clear the box first")
+                        elseif filledFor == adopted.prefix .. ">" .. lastWord then
+                            toast("already filled")
+                        elseif lastWord == "-" then
+                            toast("no suggestion yet")
+                        else
+                            print("[Sprint] completing: " .. lastWord)
+                            fillWord(lastWord, adopted.prefix)
+                        end
+                    elseif act == "HIDE" then
+                        VISIBLE = not VISIBLE
+                        print("[Sprint] overlay: " .. tostring(VISIBLE))
+                    elseif act == "RESET" then
+                        used = {}
+                        usedCount = 0
+                        adopted = nil
+                        rawPrev = nil
+                        filledFor = nil
+                        lastWord = "-"
+                        print("[Sprint] memory reset")
+                        toast("memory reset")
+                    elseif act == "COMPACT" then
+                        COMPACT = not COMPACT
+                        saveCfg()
+                        print("[Sprint] compact: " .. tostring(COMPACT))
+                    elseif act == "SKIP" then
+                        if lastWord ~= "-" then
+                            markUsed(lastWord)
+                            filledFor = nil
+                            print("[Sprint] skipped: " .. lastWord)
+                            toast("skipped " .. lastWord)
+                        end
+                    end
+                elseif not down then
+                    held[code] = false
+                end
+                end -- code ~= 112
             end
         end
         task.wait(0.08)
     end
 end)
 
-print("[Sprint] Word Sprint v1 loaded")
-print("[Sprint] Keys: F6 solve | F5 complete | F3 skip word | F7 hide | F4 reset | F8 compact")
+print("[Sprint] Keys: F6 solve F5 fill F3 skip F7 hide F4 reset F8 view F1 rebind")
