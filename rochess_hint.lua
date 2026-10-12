@@ -2870,6 +2870,7 @@ do
     local toMoveTB = nil
     local topText, botText = "?", "?"
     local stdFresh = false
+    local occSigPrev = nil
 
     -- change-only debug line (no spam: repeats are swallowed)
     local dbgLast = ""
@@ -2877,6 +2878,8 @@ do
         if s ~= dbgLast then dbgLast = s print("[RoDbg] " .. s) end
     end
     RO.health = { scans = 0, renders = 0, keys = 0, err = "" }
+    RO.evlog = {}
+    RO.holdReason = nil
 
     local BACK_NORM = { "R", "N", "B", "Q", "K", "B", "N", "R" }
     local BACK_MIRR = { "R", "N", "B", "K", "Q", "B", "N", "R" }
@@ -2885,6 +2888,19 @@ do
     local function unkey(k)
         local c = string.find(k, ",", 1, true)
         return tonumber(string.sub(k, 1, c - 1)), tonumber(string.sub(k, c + 1))
+    end
+
+    local function occSigOf(occ)
+        local t = {}
+        for _, e in ipairs(occ) do t[#t + 1] = e.file .. "," .. e.rank end
+        table.sort(t)
+        return table.concat(t, ";")
+    end
+
+    local function ev(s)
+        RO.evlog[#RO.evlog + 1] = s
+        if #RO.evlog > 25 then table.remove(RO.evlog, 1) end
+        dbg(s)
     end
 
     local function findUI()
@@ -2994,6 +3010,35 @@ do
         end
     end
 
+    local function remapTracked()
+        if not tracked then return end
+        local nt = {}
+        for k, v in pairs(tracked) do
+            local f0, r0x = unkey(k)
+            nt[(9 - f0) .. "," .. (9 - r0x)] = v
+        end
+        tracked = nt
+    end
+
+    -- pin orientation from an ASSUMED rank (sound: White moves first, so the
+    -- first observed origin half is White's under either mapping). Returns
+    -- true when it flipped the mapping (caller must mirror its keys).
+    local function pinByAssumedRank(r)
+        if flipKnown then return false end
+        local needBottom = nil
+        if r <= 2 then needBottom = true
+        elseif r >= 7 then needBottom = false end
+        if needBottom == nil then return false end
+        flipKnown = true
+        if needBottom ~= whiteBottom then
+            whiteBottom = needBottom
+            remapTracked()
+            swapQueensKings()
+            return true
+        end
+        return false
+    end
+
     local function nearestSquare(sq, ap, tol)
         local best, bestD = nil, nil
         for idx, sp in pairs(sq.pos) do
@@ -3027,24 +3072,7 @@ do
         -- pin orientation from the origin screen-half BEFORE mapping:
         -- White always moves first, so the origin half is White's.
         local r0 = math.floor((fi - 1) / 8) -- 0 = bottom screen row
-        if not flipKnown then
-            local needBottom = nil
-            if r0 <= 1 then needBottom = true
-            elseif r0 >= 6 then needBottom = false end
-            if needBottom ~= nil and needBottom ~= whiteBottom then
-                -- remap every tracked square to the corrected coordinates
-                -- (file/rank mirror), then fix the queen/king arrangement
-                whiteBottom = needBottom
-                local nt = {}
-                for k, v in pairs(tracked) do
-                    local f0, r0x = unkey(k)
-                    nt[(9 - f0) .. "," .. (9 - r0x)] = v
-                end
-                tracked = nt
-                swapQueensKings()
-            end
-            if needBottom ~= nil then flipKnown = true end
-        end
+        pinByAssumedRank(r0 <= 1 and 1 or (r0 >= 6 and 8 or 4))
         local function mapIdx(idx)
             local c0 = (idx - 1) % 8
             local q0 = math.floor((idx - 1) / 8)
@@ -3056,11 +3084,11 @@ do
         local fromK, toK = ff .. "," .. fr, tf .. "," .. tr
         if fromK == toK then return false end
         if (fromK .. ">" .. toK) == lastHLKey then return false end
-        if not tracked then dbg("hl wait ntracked") return false end
+        if not tracked then ev("hl wait ntracked") return false end
         local mover = tracked[fromK]
-        if not mover then dbg("hl stuck no-mover " .. fromK) return false end -- transient; retry
+        if not mover then ev("hl stuck no-mover " .. fromK) return false end -- transient; retry
         local victim = tracked[toK]
-        if victim and victim.white == mover.white then dbg("hl stuck friendly " .. fromK .. ">" .. toK) return false end -- illegal; hold
+        if victim and victim.white == mover.white then ev("hl stuck friendly " .. fromK .. ">" .. toK) return false end -- illegal; hold
         tracked[fromK] = nil
         if mover.letter == "K" and math.abs(tf - ff) == 2 then
             local rkFrom, rkTo
@@ -3078,7 +3106,7 @@ do
             and ((mover.white and tr == 8) or ((not mover.white) and tr == 1))
         tracked[toK] = { letter = promo and "Q" or mover.letter, white = mover.white }
         lastHLKey = fromK .. ">" .. toK
-        dbg("hl ok " .. (mover.white and "W" or "B") .. " " .. fromK .. ">" .. toK)
+        ev("hl ok " .. (mover.white and "W" or "B") .. " " .. fromK .. ">" .. toK)
         lm = { fr = fr, ff = ff, tr = tr, tf = tf, white = mover.white }
         hist[#hist + 1] = { fr = fr, ff = ff, tr = tr, tf = tf }
         if #hist > 200 then table.remove(hist, 1) end
@@ -3090,8 +3118,9 @@ do
         RO.health.scans = RO.health.scans + 1
         local occ = occSquares(ui, sq)
         if #occ == 0 then
-            emissionKnown = (prevEmission ~= nil and #prevEmission > 0)
-            if prevEmission then return prevEmission end
+            emissionKnown = false
+            RO.holdReason = "no board"
+            prevEmission = nil
             return {}
         end
         if isStandardOcc(occ) then
@@ -3102,8 +3131,10 @@ do
                 end
             end
             if not tracked or shared < 26 then
-                dbg("calib std")
+                ev("calib std")
                 tracked = assignStandard()
+                flipKnown = false
+                occSigPrev = nil
                 flipKnown = false
                 lastHLKey = nil
                 hist = {}
@@ -3118,6 +3149,7 @@ do
         end
         if not tracked then
             emissionKnown = false
+            RO.holdReason = "run script at game start!"
             local out = {}
             for _, e in ipairs(occ) do
                 out[#out + 1] = { file = e.file, rank = e.rank, letter = "?", white = nil }
@@ -3126,10 +3158,50 @@ do
             return out
         end
         local fi, ti = readHL(ui, sq)
-        dbg("scan occ=" .. #occ .. " hl=" .. (fi and (fi .. ">" .. ti) or "-"))
-        if fi and ti then applyHLMove(fi, ti) end
+        ev("scan occ=" .. #occ .. " hl=" .. (fi and (fi .. ">" .. ti) or "-"))
+        local hlDid = false
+        if fi and ti then hlDid = applyHLMove(fi, ti) end
         local occSet = {}
         for _, e in ipairs(occ) do occSet[e.file .. "," .. e.rank] = true end
+        -- occupancy fallback for quiet moves (exact: the mover's identity
+        -- comes from its origin square). Only on settled boards (same
+        -- occupancy twice running) and only when the highlight gave nothing,
+        -- so slide-animation ghosts can never become moves.
+        local sig = occSigOf(occ)
+        local settled = (sig == occSigPrev)
+        occSigPrev = sig
+        if tracked and settled and not hlDid then
+            local gone, appeared = {}, {}
+            for k, v in pairs(tracked) do
+                if not occSet[k] then
+                    local gf, gr = unkey(k)
+                    gone[#gone + 1] = { f = gf, r = gr, v = v }
+                end
+            end
+            for _, e in ipairs(occ) do
+                if not tracked[e.file .. "," .. e.rank] then appeared[#appeared + 1] = e end
+            end
+            if #gone == 1 and #appeared == 1 then
+                local g, a = gone[1], appeared[1]
+                local flipped = pinByAssumedRank(g.r)
+                local gf, gr = g.f, g.r
+                if flipped then gf, gr = 9 - gf, 9 - gr end
+                local af, ar = a.file, a.rank
+                if flipped then af, ar = 9 - af, 9 - ar end
+                local mover = tracked[gf .. "," .. gr]
+                if mover and mover.letter ~= "?" and mover.white ~= nil and not tracked[af .. "," .. ar] then
+                    tracked[gf .. "," .. gr] = nil
+                    local promo = mover.letter == "P"
+                        and ((mover.white and ar == 8) or ((not mover.white) and ar == 1))
+                    tracked[af .. "," .. ar] = { letter = promo and "Q" or mover.letter, white = mover.white }
+                    lastMove = { fr = gr, ff = gf, tr = ar, tf = af, white = mover.white }
+                    hist[#hist + 1] = { fr = gr, ff = gf, tr = ar, tf = af }
+                    if #hist > 200 then table.remove(hist, 1) end
+                    turn = not mover.white
+                    ev("occ quiet " .. (mover.white and "W" or "B") .. " " .. gf .. "," .. gr .. ">" .. af .. "," .. ar)
+                end
+            end
+        end
         local out = {}
         emissionKnown = true
         for k, v in pairs(tracked) do
@@ -3138,13 +3210,17 @@ do
                 out[#out + 1] = { file = f, rank = r, letter = v.letter, white = v.white }
             end
         end
+        local holds = {}
         for _, e in ipairs(occ) do
             if not tracked[e.file .. "," .. e.rank] then
                 out[#out + 1] = { file = e.file, rank = e.rank, letter = "?", white = nil }
                 emissionKnown = false
+                if #holds < 3 then holds[#holds + 1] = string.char(96 + e.file) .. e.rank end
             end
         end
-        dbg("emit known=" .. tostring(emissionKnown) .. " n=" .. #out .. " turn=" .. tostring(turn))
+        if emissionKnown then RO.holdReason = nil
+        elseif #holds > 0 then RO.holdReason = "hold: ?@" .. table.concat(holds, ",") end
+        ev("emit known=" .. tostring(emissionKnown) .. " n=" .. #out .. " turn=" .. tostring(turn))
         prevEmission = out
         return out
     end
@@ -3248,6 +3324,7 @@ do
             .. " scans=" .. RO.health.scans .. " renders=" .. RO.health.renders
             .. " keys=" .. RO.health.keys .. " err=" .. RO.health.err
             .. " gen=" .. tostring(_G.__RCHESS_GEN)
+            .. " ev=[" .. table.concat(RO.evlog, "|") .. "]"
     end
 end
 local function boardFromList(list)
@@ -3649,7 +3726,7 @@ task.spawn(function()
                 elseif not sane then
                     lastStatus = "kings " .. wK .. "/" .. bK .. " - holding..."
                 elseif not RO.listKnown() then
-                    lastStatus = "run script at game start!"
+                    lastStatus = RO.holdReason or "tracking..."
                 else
                     lastStatus = "waiting..."
                 end
@@ -4009,5 +4086,5 @@ task.spawn(function()
     end
 end)
 
-print("[Ro Hinter] v1.3dbg (RoChess!) loaded")
+print("[Ro Hinter] v1.4 (RoChess!) loaded")
 print("[Ro Hinter] Keys: P hide | O depth | X engine | G best-only | C color | N level | K threats")
