@@ -3223,6 +3223,27 @@ do
         return topText, botText
     end
     RO.inMatch = function(ui) return ui and #ui.bars >= 1 end
+    -- live introspection for debugging: probe via _G.__RoState()
+    _G.__RoState = function()
+        local s = RO.state()
+        local sqN, occN = -1, -1
+        local okU, ui = pcall(RO.findUI)
+        if okU and ui then
+            local okS, sq = pcall(RO.readSquares, ui)
+            if okS and sq then
+                sqN = 0
+                for _ in pairs(sq.pos) do sqN = sqN + 1 end
+                local okO, occ = pcall(occSquares, ui, sq)
+                if okO and occ then occN = #occ end
+            else
+                sqN = -2
+            end
+        end
+        return "turn=" .. tostring(s.turn) .. " flip=" .. tostring(s.flip)
+            .. " wb=" .. tostring(s.wb) .. " known=" .. tostring(emissionKnown)
+            .. " occ=" .. occN .. " sqn=" .. sqN .. " why=" .. boardWhyPub
+            .. " hist=" .. #hist .. " hlkey=" .. tostring(lastHLKey)
+    end
 end
 local function boardFromList(list)
     local bd = {}
