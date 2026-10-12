@@ -2871,6 +2871,12 @@ do
     local topText, botText = "?", "?"
     local stdFresh = false
 
+    -- change-only debug line (no spam: repeats are swallowed)
+    local dbgLast = ""
+    local function dbg(s)
+        if s ~= dbgLast then dbgLast = s print("[RoDbg] " .. s) end
+    end
+
     local BACK_NORM = { "R", "N", "B", "Q", "K", "B", "N", "R" }
     local BACK_MIRR = { "R", "N", "B", "K", "Q", "B", "N", "R" }
 
@@ -3049,11 +3055,11 @@ do
         local fromK, toK = ff .. "," .. fr, tf .. "," .. tr
         if fromK == toK then return false end
         if (fromK .. ">" .. toK) == lastHLKey then return false end
-        if not tracked then return false end
+        if not tracked then dbg("hl wait ntracked") return false end
         local mover = tracked[fromK]
-        if not mover then return false end -- transient frame; retry next scan
+        if not mover then dbg("hl stuck no-mover " .. fromK) return false end -- transient; retry
         local victim = tracked[toK]
-        if victim and victim.white == mover.white then return false end -- illegal; hold
+        if victim and victim.white == mover.white then dbg("hl stuck friendly " .. fromK .. ">" .. toK) return false end -- illegal; hold
         tracked[fromK] = nil
         if mover.letter == "K" and math.abs(tf - ff) == 2 then
             local rkFrom, rkTo
@@ -3071,6 +3077,7 @@ do
             and ((mover.white and tr == 8) or ((not mover.white) and tr == 1))
         tracked[toK] = { letter = promo and "Q" or mover.letter, white = mover.white }
         lastHLKey = fromK .. ">" .. toK
+        dbg("hl ok " .. (mover.white and "W" or "B") .. " " .. fromK .. ">" .. toK)
         lm = { fr = fr, ff = ff, tr = tr, tf = tf, white = mover.white }
         hist[#hist + 1] = { fr = fr, ff = ff, tr = tr, tf = tf }
         if #hist > 200 then table.remove(hist, 1) end
@@ -3093,6 +3100,7 @@ do
                 end
             end
             if not tracked or shared < 26 then
+                dbg("calib std")
                 tracked = assignStandard()
                 flipKnown = false
                 lastHLKey = nil
@@ -3116,6 +3124,7 @@ do
             return out
         end
         local fi, ti = readHL(ui, sq)
+        dbg("scan occ=" .. #occ .. " hl=" .. (fi and (fi .. ">" .. ti) or "-"))
         if fi and ti then applyHLMove(fi, ti) end
         local occSet = {}
         for _, e in ipairs(occ) do occSet[e.file .. "," .. e.rank] = true end
@@ -3133,6 +3142,7 @@ do
                 emissionKnown = false
             end
         end
+        dbg("emit known=" .. tostring(emissionKnown) .. " n=" .. #out .. " turn=" .. tostring(turn))
         prevEmission = out
         return out
     end
@@ -3174,18 +3184,20 @@ do
     local function tickClocks(tC, bC)
         if tC and bC and tC.secs and bC.secs then
             if prevTopSecs and prevBotSecs then
-                if tC.secs < prevTopSecs and bC.secs >= prevBotSecs then
-                    toMoveTB = "top"
-                elseif bC.secs < prevBotSecs and tC.secs >= prevTopSecs then
-                    toMoveTB = "bottom"
+                -- ONLY a fresh decrease observed on THIS scan may set the
+                -- turn. Never latch: a stale toMoveTB would override the
+                -- exact highlight-derived turn on every later scan.
+                local dec = nil
+                if tC.secs < prevTopSecs and bC.secs >= prevBotSecs then dec = "top"
+                elseif bC.secs < prevBotSecs and tC.secs >= prevTopSecs then dec = "bottom" end
+                if dec then
+                    toMoveTB = dec
+                    if flipKnown then turn = (dec == "bottom") == whiteBottom end
                 end
             elseif stdFresh and tC.secs == bC.secs then
                 turn = true -- fresh equal clocks at a standard start: White
             end
             prevTopSecs, prevBotSecs = tC.secs, bC.secs
-        end
-        if toMoveTB and flipKnown then
-            turn = (toMoveTB == "bottom") == whiteBottom
         end
     end
 
@@ -3968,5 +3980,5 @@ task.spawn(function()
     end
 end)
 
-print("[Ro Hinter] v1 (RoChess!) loaded")
+print("[Ro Hinter] v1.2dbg (RoChess!) loaded")
 print("[Ro Hinter] Keys: P hide | O depth | X engine | G best-only | C color | N level | K threats")
