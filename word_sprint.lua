@@ -1,7 +1,9 @@
 -- Word Sprint v1 for "Finish The Word!" (Roblox) - Matcha VM
 -- Reads "Type a word starting with X" prompts (one or more letters) and
 -- suggests a valid, unused word from a baked dictionary. Nothing is typed
--- automatically: press F5 to auto-complete the suggestion into the chat box,
+-- Usage: F6 on for suggestions. Click the chat box (or type a letter or
+-- two), then F5: it clears the partial text and completes the full word.
+-- YOU press Enter to send. It types slowly so no letter is ever dropped.
 -- then YOU press Enter to send it. Suggestions are creative: a random pick
 -- that climbs easy -> medium -> hard as words get used; F2 forces hard-only.
 -- Wrong/repeated words are never risked by the bot (it only ever fills
@@ -51,7 +53,6 @@ local function ensureServices()
     return lp ~= nil
 end
 
-local K_SLASH = 191
 -- live binds (rebindable via F1, persisted to file); F9/F11 never offered
 local BINDS = { SOLVE = 117, COMPLETE = 116, SKIP = 114, HARD = 113, HIDE = 118, RESET = 115, COMPACT = 119 }
 
@@ -295,10 +296,16 @@ local function fillWord(word, prefix)
     task.spawn(function()
         local alive = function() return _G.__SPRINT_GEN == MY_GEN end
         if not alive() then return end
-        pcall(function() keypress(K_SLASH) end)
-        task.wait(0.6)
+        -- contract: YOU focus the chat box first (click it or type a letter).
+        -- clear any partial typing (12 backspaces; no-op if box is empty),
+        -- then type slowly so the game drops nothing.
+        for k = 1, 12 do
+            if not alive() then return end
+            pcall(function() keypress(8) end)
+            task.wait(0.03)
+        end
         if not alive() then return end
-        -- re-verify: same STABLE prompt still adopted (never fill mid-typing)
+        -- re-verify: same STABLE prompt still adopted (never fill mid-change)
         if not adopted or adopted.prefix ~= prefix then
             status = 'prompt moved, aborted'
             return
@@ -306,7 +313,7 @@ local function fillWord(word, prefix)
         for k = 1, #word do
             if not alive() then return end
             pcall(function() keypress(string.byte(word, k)) end)
-            task.wait(0.05)
+            task.wait(0.12)
         end
         filledFor = prefix .. '>' .. word
         status = 'filled ' .. word .. ' - Enter to send'
@@ -543,9 +550,6 @@ task.spawn(function()
                             toast("solver first")
                         elseif not adopted then
                             toast("no prompt")
-                        elseif not stableNow then
-                            status = "hold - clear the box first"
-                            toast("clear the box first")
                         elseif filledFor == adopted.prefix .. ">" .. lastWord then
                             toast("already filled")
                         elseif lastWord == "-" then
