@@ -5,8 +5,9 @@
 -- from pattern feedback. Solving is OFF by default: toggle it when it's
 -- your guessing turn.
 --
--- Keys: H toggle auto-solve | P show/hide overlay | R reset round memory
--- Panel (right side): pattern, candidates, suggestion, guessed, status.
+-- Keys (F-keys so typing answers never triggers them):
+--   F6 toggle auto-solve | F7 show/hide overlay | F4 reset round | F8 compact/full
+-- Panel (right side, mini by default): pattern -> suggestion, title shows ON/OFF.
 --
 -- Honest limits:
 --   * Needs visible letter slots (a live hangman round). Lobby shows "no pattern".
@@ -20,6 +21,7 @@ local running = true
 local VISIBLE = true
 local SOLVE = false
 local COMPACT = true -- mini one-line bar instead of the full panel
+local HEALTH = { solves = 0, renders = 0, keys = 0, err = "" }
 
 local Players = nil
 local lp = nil
@@ -35,7 +37,7 @@ local function ensureServices()
     return lp ~= nil
 end
 
-local VK = { H = 72, P = 80, R = 82, C = 67 }
+local VK = { SOLVE = 117, HIDE = 118, RESET = 115, COMPACT = 119 }
 
 local function toast(msg)
     pcall(function() notify("Hang Solver", msg, 2) end)
@@ -286,10 +288,21 @@ end
 
 local view = { pat = "", ncand = 0, sugg = "-", guessedTxt = "", wrongTxt = "", solveTxt = "OFF" }
 
+-- live introspection: probe via _G.__HangState()
+_G.__HangState = function()
+    return "solve=" .. tostring(SOLVE) .. " compact=" .. tostring(COMPACT)
+        .. " pat=" .. view.pat .. " sugg=" .. view.sugg
+        .. " status=" .. status
+        .. " solves=" .. HEALTH.solves .. " renders=" .. HEALTH.renders
+        .. " keys=" .. HEALTH.keys .. " err=" .. HEALTH.err
+        .. " gen=" .. tostring(_G.__HANG_GEN)
+end
+
 -- ---- solver loop -----------------------------------------------------------
 task.spawn(function()
     while running do
         if _G.__HANG_GEN ~= MY_GEN then break end
+        HEALTH.solves = HEALTH.solves + 1
         local okLoop, errLoop = pcall(function()
             if not ensureServices() then task.wait(1.0) return end
             local ui = findUI()
@@ -389,6 +402,7 @@ task.spawn(function()
             task.wait(0.5)
         end)
         if not okLoop then
+            HEALTH.err = tostring(errLoop):sub(1, 100)
             print("[Hang] loop error: " .. tostring(errLoop))
             task.wait(0.5)
         end
@@ -399,6 +413,7 @@ end)
 task.spawn(function()
     while running do
         if _G.__HANG_GEN ~= MY_GEN then break end
+        HEALTH.renders = HEALTH.renders + 1
         if not VISIBLE then
             hidePanel()
         else
@@ -449,32 +464,30 @@ end)
 -- ---- input -----------------------------------------------------------------
 task.spawn(function()
     local held = {}
-    local keys = {
-        { v = VK.H, name = "H" }, { v = VK.P, name = "P" }, { v = VK.R, name = "R" },
-        { v = VK.C, name = "C" },
-    }
+    local keys = { VK.SOLVE, VK.HIDE, VK.RESET, VK.COMPACT }
     while running do
         if _G.__HANG_GEN ~= MY_GEN then break end
-        for _, k in ipairs(keys) do
-            local down = iskeypressed(k.v)
-            if down and not held[k.v] then
-                held[k.v] = true
-                if k.v == VK.H then
+        for _, code in ipairs(keys) do
+            local down = iskeypressed(code)
+            if down and not held[code] then
+                held[code] = true
+                HEALTH.keys = HEALTH.keys + 1
+                if code == VK.SOLVE then
                     SOLVE = not SOLVE
                     print("[Hang] auto-solve: " .. (SOLVE and "ON" or "OFF"))
                     toast("auto-solve " .. (SOLVE and "ON" or "OFF"))
-                elseif k.v == VK.P then
+                elseif code == VK.HIDE then
                     VISIBLE = not VISIBLE
                     print("[Hang] overlay: " .. tostring(VISIBLE))
-                elseif k.v == VK.R then
+                elseif code == VK.RESET then
                     resetRound("manual")
                     toast("round reset")
-                elseif k.v == VK.C then
+                elseif code == VK.COMPACT then
                     COMPACT = not COMPACT
                     print("[Hang] compact: " .. tostring(COMPACT))
                 end
             elseif not down then
-                held[k.v] = false
+                held[code] = false
             end
         end
         task.wait(0.08)
@@ -482,4 +495,4 @@ task.spawn(function()
 end)
 
 print("[Hang] Hangman Solver v1 loaded")
-print("[Hang] Keys: H solve on/off | P hide | R reset round | C compact/full")
+print("[Hang] Keys: F6 solve | F7 hide | F4 reset | F8 compact")
