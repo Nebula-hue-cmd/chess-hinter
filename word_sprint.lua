@@ -90,6 +90,11 @@ local lastWord = "-"
 local lastPrompt = "-"
 local lastResult = "-"
 local sendAttempts = 0
+local sendLog = {}
+local function slog(s)
+    sendLog[#sendLog + 1] = s
+    if #sendLog > 10 then table.remove(sendLog, 1) end
+end
 
 local function markUsed(word)
     if type(word) ~= "string" then return end
@@ -215,15 +220,22 @@ local function sendWord(word, prefix)
         end
         local alive = function() return _G.__SPRINT_GEN == MY_GEN end
         if not alive() then sending = false return end
+        slog("esc")
+        pcall(function() keypress(K_ESC) end)
+        task.wait(0.25)
+        if not alive() then sending = false return end
+        slog("slash")
         pcall(function() keypress(K_SLASH) end)
-        task.wait(0.45)
+        task.wait(0.6)
         if not alive() then sending = false return end
         local p = readPrompt()
         if not p or p.prefix ~= prefix then
             pcall(function() keypress(K_ESC) end)
+            slog("abort-moved")
             done("prompt moved, aborted")
             return
         end
+        slog("type:" .. #word)
         for i = 1, #word do
             if not alive() then sending = false return end
             pcall(function() keypress(string.byte(word, i)) end)
@@ -231,6 +243,7 @@ local function sendWord(word, prefix)
         end
         task.wait(0.25)
         if not alive() then sending = false return end
+        slog("enter")
         pcall(function() keypress(K_ENTER) end)
         local t0 = tick()
         local ok = false
@@ -243,11 +256,13 @@ local function sendWord(word, prefix)
         if ok then
             lastSendT = tick()
             answeredKey = prefix
+            slog("verified")
             done("sent " .. word)
             print("[Sprint] sent: " .. word)
         else
             pcall(function() keypress(K_ESC) end)
             answeredKey = prefix
+            slog("miss")
             done("unverified: " .. word)
             print("[Sprint] unverified: " .. word)
         end
@@ -288,6 +303,7 @@ _G.__SprintState = function()
     return "solve=" .. tostring(SOLVE) .. " prompt=" .. lastPrompt
         .. " word=" .. lastWord .. " status=" .. status
         .. " lastResult=" .. lastResult .. " attempts=" .. sendAttempts
+        .. " slog=" .. table.concat(sendLog, "|")
         .. " loops=" .. HEALTH.loops .. " renders=" .. HEALTH.renders
         .. " keys=" .. HEALTH.keys .. " err=" .. HEALTH.err
         .. " gen=" .. tostring(_G.__SPRINT_GEN)
