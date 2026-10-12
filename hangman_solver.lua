@@ -19,6 +19,7 @@ local MY_GEN = _G.__HANG_GEN
 local running = true
 local VISIBLE = true
 local SOLVE = false
+local COMPACT = true -- mini one-line bar instead of the full panel
 
 local Players = nil
 local lp = nil
@@ -34,7 +35,11 @@ local function ensureServices()
     return lp ~= nil
 end
 
-local VK = { H = 72, P = 80, R = 82 }
+local VK = { H = 72, P = 80, R = 82, C = 67 }
+
+local function toast(msg)
+    pcall(function() notify("Hang Solver", msg, 2) end)
+end
 
 local DICT_CSV = {
     [2]="AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AP,AR,AS,AT,AU,AV,AW,AZ,BA,BB,BC,BD,BE,BG,BI,BK,BL,BM,BO,BP,BR,BS,BT,BW,BY,CA,CB,CC,CD,CE,CF,CG,CH,CI,CJ,CL,CM,CN,CO,CP,CR,CS,CT,CU,CV,CW,CZ,DA,DB,DC,DD,DE,DF,DG,DH,DI,DJ,DK,DL,DM,DO,DP,DR,DS,DT,DU,DV,DX,EA,EC,ED,EE,EF,EG,EH,EL,EM,EN,EP,EQ,ER,ES,ET,EU,EV,EX,EZ,FA,FC,FD,FE,FF,FG,FI,FL,FM,FO,FP,FR,FS,FT,FU,FW,FX,FY,GA,GB,GC,GD,GE,GG,GI,GL,GM,GO,GP,GR,GS,GT,HA,HB,HC,HD,HE,HH,HI,HK,HL,HO,HP,HQ,HR,HS,HT,HU,HZ,IA,IC,ID,IE,IF,II,IL,IM,IN,IO,IP,IR,IS,IT,IV,IX,JA,JC,JD,JE,JJ,JM,JO,JP,JR,JS,KA,KB,KG,KM,KO,KS,KW,KY,LA,LB,LC,LD,LE,LF,LG,LI,LL,LM,LN,LO,LP,LS,LT,LU,MA,MB,MC,MD,ME,MF,MG,MH,MI,MJ,ML,MM,MN,MO,MP,MR,MS,MT,MU,MV,MW,MX,MY,NA,NB,NC,ND,NE,NG,NH,NI,NJ,NL,NM,NN,NO,NP,NR,NS,NT,NU,NV,NW,NY,NZ,OB,OC,OE,OF,OG,OH,OK,OL,OM,ON,OO,OP,OR,OS,OT,OU,OZ,PA,PB,PC,PD,PE,PF,PG,PH,PI,PJ,PK,PL,PM,PN,PO,PP,PR,PS,PT,QC,QT,RA,RB,RC,RD,RE,RF,RG,RH,RI,RJ,RL,RM,RN,RO,RP,RR,RS,RT,RU,RV,RW,RX,SA,SB,SC,SD,SE,SF,SG,SH,SI,SK,SL,SM,SN,SO,SP,SQ,SR,SS,ST,SU,SV,SW,TA,TB,TC,TD,TE,TF,TH,TI,TM,TN,TO,TP,TR,TS,TT,TU,TV,TX,TY,UC,UH,UI,UK,UL,UM,UN,UP,UR,US,UT,UV,UW,VA,VB,VC,VE,VG,VI,VP,VS,VT,WA,WB,WC,WE,WI,WM,WN,WP,WR,WS,WT,WU,WV,WW,WX,WY,XI,XL,XP,XX,YA,YE,YN,YO,YR,YU,ZA,ZU",
@@ -75,6 +80,7 @@ local lastClickT = 0
 local lastPattern = ""
 local lastLen = 0
 local hadKnown = false
+local solvedToast = false
 local status = "starting..."
 
 local function resetRound(reason)
@@ -83,6 +89,7 @@ local function resetRound(reason)
     pending = nil
     lastActSig = ""
     hadKnown = false
+    solvedToast = false
     if reason then print("[Hang] reset: " .. reason) end
 end
 
@@ -316,6 +323,10 @@ task.spawn(function()
             local sugg = nil
             if known >= pat.len then
                 status = "SOLVED: " .. pat.text
+                if not solvedToast then
+                    solvedToast = true
+                    toast("Solved: " .. pat.text)
+                end
             else
                 cands = candidatesFor(pat.text)
                 sugg = suggestFor(pat.text, cands)
@@ -399,24 +410,35 @@ task.spawn(function()
             if vs and vs.Y and vs.Y > 100 then vpy = vs.Y end
             local px, py = vpx - 264, 84
             panelBg.Position = Vector2.new(px, py)
-            panelBg.Size = Vector2.new(248, 139)
-            panelBg.Visible = true
-            panelTitle.Text = "Hang Solver [" .. view.solveTxt .. "]"
+            panelTitle.Text = "Hang [" .. view.solveTxt .. "]"
             panelTitle.Position = Vector2.new(px + 10, py + 6)
             panelTitle.Visible = true
-            local rows = {
-                view.pat ~= "" and view.pat or "...",
-                "cand " .. view.ncand .. "  -> " .. view.sugg,
-                "used " .. (view.guessedTxt ~= "" and view.guessedTxt or "-"),
-                "miss " .. (view.wrongTxt ~= "" and view.wrongTxt or "-"),
-                status,
-            }
+            local rows
+            if COMPACT then
+                panelBg.Size = Vector2.new(264, 34)
+                panelBg.Visible = true
+                rows = { (view.pat ~= "" and view.pat or "...") .. "  -> " .. view.sugg }
+            else
+                panelBg.Size = Vector2.new(248, 139)
+                panelBg.Visible = true
+                rows = {
+                    view.pat ~= "" and view.pat or "...",
+                    "cand " .. view.ncand .. "  -> " .. view.sugg,
+                    "used " .. (view.guessedTxt ~= "" and view.guessedTxt or "-"),
+                    "miss " .. (view.wrongTxt ~= "" and view.wrongTxt or "-"),
+                    status,
+                }
+            end
             local y = py + 28
-            for i, txt in ipairs(rows) do
-                panelRows[i].Text = txt
-                panelRows[i].Position = Vector2.new(px + 10, y)
-                panelRows[i].Visible = true
-                y = y + 21
+            for i = 1, 5 do
+                if rows[i] then
+                    panelRows[i].Text = rows[i]
+                    panelRows[i].Position = Vector2.new(px + 10, y)
+                    panelRows[i].Visible = true
+                    y = y + 21
+                else
+                    panelRows[i].Visible = false
+                end
             end
         end
         task.wait(0.08)
@@ -429,6 +451,7 @@ task.spawn(function()
     local held = {}
     local keys = {
         { v = VK.H, name = "H" }, { v = VK.P, name = "P" }, { v = VK.R, name = "R" },
+        { v = VK.C, name = "C" },
     }
     while running do
         if _G.__HANG_GEN ~= MY_GEN then break end
@@ -439,11 +462,16 @@ task.spawn(function()
                 if k.v == VK.H then
                     SOLVE = not SOLVE
                     print("[Hang] auto-solve: " .. (SOLVE and "ON" or "OFF"))
+                    toast("auto-solve " .. (SOLVE and "ON" or "OFF"))
                 elseif k.v == VK.P then
                     VISIBLE = not VISIBLE
                     print("[Hang] overlay: " .. tostring(VISIBLE))
                 elseif k.v == VK.R then
                     resetRound("manual")
+                    toast("round reset")
+                elseif k.v == VK.C then
+                    COMPACT = not COMPACT
+                    print("[Hang] compact: " .. tostring(COMPACT))
                 end
             elseif not down then
                 held[k.v] = false
@@ -454,4 +482,4 @@ task.spawn(function()
 end)
 
 print("[Hang] Hangman Solver v1 loaded")
-print("[Hang] Keys: H solve on/off | P hide | R reset round")
+print("[Hang] Keys: H solve on/off | P hide | R reset round | C compact/full")
