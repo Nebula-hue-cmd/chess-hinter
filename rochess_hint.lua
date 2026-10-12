@@ -3005,10 +3005,11 @@ do
         local lf = hl:FindFirstChild("LastFrom")
         local lt = hl:FindFirstChild("LastTo")
         if not lf or not lt then return nil end
+        -- NOTE: AbsoluteSize always reads (0,0) in this VM, so it cannot
+        -- gate anything. Inactive highlights park both frames on one square
+        -- (top-left corner), which the fi==ti rule below already rejects.
         local fp, tp = lf.AbsolutePosition, lt.AbsolutePosition
-        local fs, ts = lf.AbsoluteSize, lt.AbsoluteSize
-        if not fp or not tp or not fs or not ts then return nil end
-        if fs.X < 8 or fs.Y < 8 or ts.X < 8 or ts.Y < 8 then return nil end
+        if not fp or not tp then return nil end
         local fi = nearestSquare(sq, fp, 1.2)
         local ti = nearestSquare(sq, tp, 1.2)
         if not fi or not ti or fi == ti then return nil end
