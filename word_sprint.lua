@@ -33,7 +33,7 @@ local function ensureServices()
     return lp ~= nil
 end
 
-local VK = { SOLVE = 117, COMPLETE = 116, HIDE = 118, RESET = 115, COMPACT = 119 }
+local VK = { SOLVE = 117, COMPLETE = 116, HIDE = 118, RESET = 115, COMPACT = 119, SKIP = 114 }
 local K_SLASH = 191
 
 local function toast(msg)
@@ -70,13 +70,11 @@ local DICT_LETTER = {
 }
 
 local WORDS = {}
-local CURSOR = {}
 local function buildDict()
     for L, csv in pairs(DICT_LETTER) do
         local t = {}
         for w in string.gmatch(csv, "([^,]+)") do t[#t + 1] = w end
         WORDS[L] = t
-        CURSOR[L] = 1
     end
 end
 buildDict()
@@ -100,16 +98,14 @@ local function markUsed(word)
     used[w] = true
 end
 
+-- pure: same prompt + same used-set always returns the same word.
+-- The suggestion only moves on when a word gets used (sent/observed).
 local function pickWord(prefix)
     local L = string.sub(prefix, 1, 1)
     local list = WORDS[L]
-    if not list or #list == 0 then return nil end
-    local n = #list
-    local start = CURSOR[L] or 1
-    for k = 0, n - 1 do
-        local w = list[((start + k - 1) % n) + 1]
+    if not list then return nil end
+    for _, w in ipairs(list) do
         if string.sub(w, 1, #prefix) == prefix and not used[w] then
-            CURSOR[L] = ((start + k) % n) + 1
             return w
         end
     end
@@ -369,7 +365,7 @@ end)
 -- ---- input -----------------------------------------------------------------
 task.spawn(function()
     local held = {}
-    local keys = { VK.SOLVE, VK.COMPLETE, VK.HIDE, VK.RESET, VK.COMPACT }
+    local keys = { VK.SOLVE, VK.COMPLETE, VK.HIDE, VK.RESET, VK.COMPACT, VK.SKIP }
     while running do
         if _G.__SPRINT_GEN ~= MY_GEN then break end
         for _, code in ipairs(keys) do
@@ -412,6 +408,13 @@ task.spawn(function()
                 elseif code == VK.COMPACT then
                     COMPACT = not COMPACT
                     print("[Sprint] compact: " .. tostring(COMPACT))
+                elseif code == VK.SKIP then
+                    if lastWord ~= "-" then
+                        used[lastWord] = true
+                        filledFor = nil
+                        print("[Sprint] skipped: " .. lastWord)
+                        toast("skipped " .. lastWord)
+                    end
                 end
             elseif not down then
                 held[code] = false
@@ -422,4 +425,4 @@ task.spawn(function()
 end)
 
 print("[Sprint] Word Sprint v1 loaded")
-print("[Sprint] Keys: F6 solve | F5 complete | F7 hide | F4 reset | F8 compact")
+print("[Sprint] Keys: F6 solve | F5 complete | F3 skip word | F7 hide | F4 reset | F8 compact")
