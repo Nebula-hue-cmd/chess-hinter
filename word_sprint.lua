@@ -13,7 +13,7 @@ _G.__SPRINT_GEN = (_G.__SPRINT_GEN or 0) + 1
 local MY_GEN = _G.__SPRINT_GEN
 local running = true
 local VISIBLE = true
-local SOLVE = false
+local SOLVE = _G.__SPRINT_SOLVE or false
 local COMPACT = true
 local HEALTH = { loops = 0, renders = 0, keys = 0, err = "" }
 
@@ -81,33 +81,33 @@ buildDict()
 DICT_LETTER = nil
 
 -- state
-local used = {} -- used[L][word] = true (own sends + chat-observed)
-local answeredLetter = nil
+local used = {} -- used[WORD] = true (own sends + chat-observed)
+local answeredKey = nil
 local sending = false
 local lastSendT = 0
 local status = "starting..."
 local lastWord = "-"
 local lastPrompt = "-"
+local lastResult = "-"
+local sendAttempts = 0
 
 local function markUsed(word)
     if type(word) ~= "string" then return end
     local w = string.upper(word)
     if #w < 2 or #w > 15 then return end
     if not string.match(w, "^[A-Z]+$") then return end
-    local L = string.sub(w, 1, 1)
-    used[L] = used[L] or {}
-    used[L][w] = true
+    used[w] = true
 end
 
-local function pickWord(L)
+local function pickWord(prefix)
+    local L = string.sub(prefix, 1, 1)
     local list = WORDS[L]
     if not list or #list == 0 then return nil end
-    used[L] = used[L] or {}
     local n = #list
     local start = CURSOR[L] or 1
     for k = 0, n - 1 do
         local w = list[((start + k - 1) % n) + 1]
-        if not used[L][w] then
+        if string.sub(w, 1, #prefix) == prefix and not used[w] then
             CURSOR[L] = ((start + k) % n) + 1
             return w
         end
@@ -122,20 +122,43 @@ local function readPrompt()
     local sg = pg and pg:FindFirstChild("ScreenGui")
     local tb = sg and sg:FindFirstChild("TopBar")
     if not tb then return nil end
-    local q, letter = nil, nil
+    local q = nil
+    local parts = {}
     for _, d in ipairs(tb:GetDescendants()) do
         if d.ClassName == "TextLabel" then
             local ok, t = pcall(function() return d.Text end)
             if ok and type(t) == "string" and t ~= "" then
-                if d.Name == "QuestionLabel" then q = t
-                elseif #t == 1 and string.match(t, "^[A-Za-z]$") then letter = string.upper(t) end
+                if d.Name == "QuestionLabel" then
+                    q = t
+                elseif string.match(t, "^[A-Za-z]+$") and #t <= 3 then
+                    local ap = d.AbsolutePosition
+                    parts[#parts + 1] = { t = string.upper(t), x = ap and ap.X or 0 }
+                end
             end
         end
     end
-    if q and letter and string.find(string.lower(q), "starting with", 1, true) then
-        return { letter = letter, q = q }
+    if not q or not string.find(string.lower(q), "starting with", 1, true) then return nil end
+    if #parts == 0 then return nil end
+    table.sort(parts, function(a, b) return a.x < b.x end)
+    -- prefer an explicit multi-letter prefix label, else join split singles
+    local prefix = nil
+    for _, p in ipairs(parts) do
+        if #p.t > 1 then prefix = p.t break end
     end
-    return nil
+    if not prefix then
+        if #parts == 1 then
+            prefix = parts[1].t
+        else
+            local s = {}
+            for _, p in ipairs(parts) do
+                if #p.t == 1 then s[#s + 1] = p.t end
+            end
+            if #s == 0 then return nil end
+            prefix = table.concat(s)
+        end
+    end
+    if prefix == "" or #prefix > 3 then return nil end
+    return { letter = string.sub(prefix, 1, 1), prefix = prefix, q = q }
 end
 
 local function chatWindows()
@@ -181,11 +204,13 @@ local function chatHasMine(word)
     return false
 end
 
-local function sendWord(word, letter)
+local function sendWord(word, prefix)
     sending = true
+    sendAttempts = sendAttempts + 1
     task.spawn(function()
         local done = function(s)
             status = s
+            lastResult = s
             sending = false
         end
         local alive = function() return _G.__SPRINT_GEN == MY_GEN end
@@ -194,7 +219,7 @@ local function sendWord(word, letter)
         task.wait(0.45)
         if not alive() then sending = false return end
         local p = readPrompt()
-        if not p or p.letter ~= letter then
+        if not p or p.prefix ~= prefix then
             pcall(function() keypress(K_ESC) end)
             done("prompt moved, aborted")
             return
@@ -217,12 +242,12 @@ local function sendWord(word, letter)
         markUsed(word)
         if ok then
             lastSendT = tick()
-            answeredLetter = letter
+            answeredKey = prefix
             done("sent " .. word)
             print("[Sprint] sent: " .. word)
         else
             pcall(function() keypress(K_ESC) end)
-            answeredLetter = letter
+            answeredKey = prefix
             done("unverified: " .. word)
             print("[Sprint] unverified: " .. word)
         end
@@ -262,6 +287,7 @@ local view = { line1 = "...", line2 = "", solveTxt = "OFF" }
 _G.__SprintState = function()
     return "solve=" .. tostring(SOLVE) .. " prompt=" .. lastPrompt
         .. " word=" .. lastWord .. " status=" .. status
+        .. " lastResult=" .. lastResult .. " attempts=" .. sendAttempts
         .. " loops=" .. HEALTH.loops .. " renders=" .. HEALTH.renders
         .. " keys=" .. HEALTH.keys .. " err=" .. HEALTH.err
         .. " gen=" .. tostring(_G.__SPRINT_GEN)
@@ -276,27 +302,27 @@ task.spawn(function()
             if not ensureServices() then task.wait(1.0) return end
             local p = readPrompt()
             if p then
-                lastPrompt = p.letter
+                lastPrompt = p.prefix
                 observeChat()
-                if SOLVE and not sending and answeredLetter ~= p.letter
+                if SOLVE and not sending and answeredKey ~= p.prefix
                     and tick() - lastSendT > 3.5 then
-                    local w = pickWord(p.letter)
+                    local w = pickWord(p.prefix)
                     if w then
                         lastWord = w
                         status = "answering " .. w .. "..."
-                        sendWord(w, p.letter)
+                        sendWord(w, p.prefix)
                     else
-                        status = "no fresh word for " .. p.letter
+                        status = "no fresh word for " .. p.prefix
                     end
                 elseif not SOLVE then
                     status = "armed OFF (F6)"
                 elseif sending then
                     status = status
-                elseif answeredLetter == p.letter then
-                    status = "answered " .. p.letter .. ", waiting next"
+                elseif answeredKey == p.prefix then
+                    status = "answered " .. p.prefix .. ", waiting next"
                 end
             else
-                if answeredLetter ~= nil then answeredLetter = nil end
+                if answeredKey ~= nil then answeredKey = nil end
                 lastPrompt = "-"
                 status = "waiting for prompt..."
             end
@@ -341,7 +367,7 @@ task.spawn(function()
                 panelBg.Size = Vector2.new(264, 100)
                 panelBg.Visible = true
                 local uc = 0
-                for _, s in pairs(used) do for _ in pairs(s) do uc = uc + 1 end end
+                for _ in pairs(used) do uc = uc + 1 end
                 rows = { view.line1, view.line2, "used words: " .. uc, "F6 solve F8 full" }
             end
             local y = py + 28
@@ -374,6 +400,7 @@ task.spawn(function()
                 HEALTH.keys = HEALTH.keys + 1
                 if code == VK.SOLVE then
                     SOLVE = not SOLVE
+                    _G.__SPRINT_SOLVE = SOLVE
                     print("[Sprint] auto-answer: " .. (SOLVE and "ON" or "OFF"))
                     toast("auto-answer " .. (SOLVE and "ON" or "OFF"))
                 elseif code == VK.HIDE then
@@ -381,7 +408,7 @@ task.spawn(function()
                     print("[Sprint] overlay: " .. tostring(VISIBLE))
                 elseif code == VK.RESET then
                     used = {}
-                    answeredLetter = nil
+                    answeredKey = nil
                     print("[Sprint] memory reset")
                     toast("memory reset")
                 elseif code == VK.COMPACT then
