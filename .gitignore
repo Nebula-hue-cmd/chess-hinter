@@ -9,3 +9,12 @@ Thumbs.db
 # Editor / OS backup junk
 *.tmp
 *~
+
+# Secrets and local state
+config.json
+.env
+*.key
+__pycache__/
+
+# Private unobfuscated sources - never track (repo holds extractors only)
+src_private/
