@@ -292,14 +292,20 @@ local function chatHasMine(word)
     return false
 end
 
+local fillBusyUntil = 0
 local function fillWord(word, prefix)
+    -- single-flight: overlapping fills erase each other (typed-then-deleted)
+    if tick() < fillBusyUntil then
+        status = "filling..."
+        return
+    end
+    fillBusyUntil = tick() + 6
     task.spawn(function()
         local alive = function() return _G.__SPRINT_GEN == MY_GEN end
         if not alive() then return end
-        -- contract: YOU focus the chat box first (click it or type a letter).
-        -- clear any partial typing (12 backspaces; no-op if box is empty),
-        -- then type slowly so the game drops nothing.
-        for k = 1, 12 do
+        -- contract: YOU focus by typing first (game reads keys globally).
+        -- clear just your partial bit (4 backspaces), then type slowly.
+        for k = 1, 4 do
             if not alive() then return end
             pcall(function() keypress(8) end)
             task.wait(0.03)
